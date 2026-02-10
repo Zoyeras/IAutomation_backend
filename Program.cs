@@ -3,7 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using AutomationAPI.Services;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddScoped<IAutomationService, AutomationService>();
+builder.Services.AddSingleton<IAutomationService, AutomationService>();
 // 1. Base de Datos
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
