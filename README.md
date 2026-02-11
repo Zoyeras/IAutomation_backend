@@ -24,7 +24,9 @@ API REST en **ASP.NET Core (.NET 10)** que:
 - [Playwright (instalación de browsers)](#playwright-instalación-de-browsers)
 - [Troubleshooting](#troubleshooting)
   - [Error: NullReferenceException al leer opciones del select de Ciudad](#error-nullreferenceexception-al-leer-opciones-del-select-de-ciudad)
+  - [Error: column "EstadoAutomatizacion" of relation "Registros" does not exist](#error-column-estadoautomatizacion-of-relation-registros-does-not-exist)
 - [Sugerencias de mejora](#sugerencias-de-mejora)
+- [Implementaciones y arreglos (historial)](#implementaciones-y-arreglos-historial)
 
 ---
 
@@ -43,6 +45,64 @@ Componentes principales:
 - `Models/Registro.cs`: entidad EF Core.
 - `Data/AppDbContext.cs`: DbContext con `DbSet<Registro>`.
 - `Services/AutomationService.cs`: bot Playwright.
+
+---
+
+## Changelog corto (cambios recientes)
+
+### Arreglo: error de DI (DbContextOptions scoped vs singleton)
+
+Si al ejecutar `dotnet run` aparecía un error similar a:
+
+- `Cannot consume scoped service 'DbContextOptions<AppDbContext>' from singleton ... (DbContextPool/DbContextFactory)`
+
+El arreglo aplicado fue **evitar mezclar** `AddDbContext(...)` con `AddDbContextFactory/AddPooledDbContextFactory` en una forma que termine registrando `DbContextOptions<T>` como *scoped* para un servicio *singleton*.
+
+**Configuración recomendada (actual):**
+
+- Usar `AddPooledDbContextFactory<AppDbContext>(...)` (seguro para tareas en background / singleton).
+- Registrar `AppDbContext` como *scoped* para controllers, creado desde la factory.
+
+Esto queda en `Program.cs` (resumen):
+
+- `AddPooledDbContextFactory<AppDbContext>(...)`
+- `AddScoped<AppDbContext>(sp => sp.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContext())`
+
+---
+
+### WhatsApp Web (sesión persistida)
+
+El bot también puede enviar un mensaje vía **WhatsApp Web** usando Playwright.
+
+- La primera vez abrirá `https://web.whatsapp.com` y debes escanear el QR.
+- La sesión se guarda en un archivo `storageState` para reutilizarse en próximas ejecuciones.
+
+Configuración en `appsettings.json`:
+
+- `WhatsAppConfig:SendTo` → número destino (fijo) en formato E.164 sin `+` (ej: `573105003030`).
+- `WhatsAppConfig:StorageStatePath` → archivo donde se persiste la sesión (ej: `whatsapp.storage.json`).
+
+Notas importantes:
+
+- Para evitar que en Linux el navegador intente abrir el esquema `whatsapp://send` (que puede fallar por falta de handler), el bot abre el chat usando **solo web**:
+  - `https://web.whatsapp.com/send?phone=<E164>&text=<mensaje>`
+- El `storageState` se guarda en el **ContentRoot** del proyecto (no en `bin/Debug/...`) para que realmente persista entre ejecuciones.
+- Si configuras `WhatsAppConfig:GroupName`, el bot **enviará al grupo/chat** buscando por nombre en WhatsApp Web y haciendo click en **el primer resultado**.
+  - Ejemplo: `"GroupName": "Tickets Soluciones"`
+  - Si `GroupName` está vacío, se usa `SendTo` (número) como fallback.
+
+## WhatsApp: forzar envío temporal a número (deshabilitar grupo)
+
+Si por ahora NO quieres enviar al grupo y prefieres enviar **siempre** al número fijo `3105003030`, deja `GroupName` vacío en `appsettings.json`:
+
+- `WhatsAppConfig:SendTo`: `573105003030` (formato E.164 sin `+`)
+- `WhatsAppConfig:GroupName`: `""`
+
+Cuando quieras volver a enviar al grupo, vuelve a poner por ejemplo:
+
+- `WhatsAppConfig:GroupName`: `"Tickets Soluciones"`
+
+> Nota: si `GroupName` tiene un valor, el bot prioriza el envío al grupo/chat. Si está vacío, usa `SendTo`.
 
 ---
 
@@ -90,6 +150,15 @@ Campos principales:
 - `TipoCliente` (texto: `Nuevo`, `Antiguo`, `Fidelizado`, `Recuperado`)
 - `Concepto`
 - `FechaCreacion` (UTC)
+
+Campos adicionales (integridad / auditoría):
+
+- `Ticket`: ticket capturado del SIC (se llena después de validar en el listado)
+- `EstadoAutomatizacion`: `PENDIENTE` | `EN_PROCESO` | `COMPLETADO` | `ERROR`
+- `UltimoErrorAutomatizacion`: último error si falló el bot
+- `FechaActualizacion`: última vez que se actualizó el registro
+
+> Importante: si actualizas el código, aplica migraciones con `dotnet ef database update`.
 
 ---
 
@@ -278,6 +347,27 @@ Con esto se evitó pasar por el converter interno que estaba causando el `NullRe
 
 ---
 
+### Error: column "EstadoAutomatizacion" of relation "Registros" does not exist
+
+Si al hacer `POST /api/registros` ves un error como:
+
+- `42703: column "EstadoAutomatizacion" of relation "Registros" does not exist`
+
+Significa que el **modelo** (`Models/Registro.cs`) tiene campos nuevos, pero la **base de datos** no fue actualizada.
+
+**Solución:** aplicar migraciones.
+
+```bash
+dotnet ef database update
+```
+
+Notas:
+
+- Existe una migración antigua `AddAutomationStatusFields` que quedó vacía (no aplicaba cambios). La migración que realmente agrega las columnas es `FixAutomationStatusFields`.
+- Si ya habías creado la tabla antes de esos cambios, es obligatorio correr el `database update` para que se creen las columnas nuevas.
+
+---
+
 ## Sugerencias de mejora
 
 - No guardar secretos en `appsettings.json` (usar variables de entorno/User Secrets).
@@ -285,3 +375,105 @@ Con esto se evitó pasar por el converter interno que estaba causando el `NullRe
 - Agregar endpoints `GET` para listar registros.
 - Guardar estado de ejecución del bot (éxito/fallo) en base de datos.
 - Rellenar campos faltantes del formulario SIC (por ejemplo `#telefono`, `#asignado_a`, `#linea_venta`, etc.), si el flujo lo requiere.
+
+---
+
+## Implementaciones y arreglos (historial)
+
+Esta sección resume problemas reales encontrados en pruebas y cómo se solucionaron, para que quede trazabilidad.
+
+### 1) Integración de nuevos campos SIC
+
+**Requerimientos:**
+
+- `#telefono` siempre debe ser `3105003030`.
+- Enviar y mapear:
+  - `#medio_contacto`
+  - `#asignado_a`
+  - `#linea_venta`
+
+**Implementación (bot Playwright):**
+
+- Se fuerza `#telefono = 3105003030`.
+- `#medio_contacto`: el SIC a veces lo renderiza como `<input>` (no `<select>`). Por eso se implementó lógica que:
+  - detecta el `tagName` y usa `FillAsync(...)` si es input/textarea;
+  - usa `SelectOptionAsync(...)` solo si realmente es `<select>`.
+- `#asignado_a`: se mapea el **nombre** (ej. `OSCAR FERNANDO`) al `value` esperado del `<select>` (`40`, `9`, etc.).
+- `#linea_venta`: se traduce desde el texto (`Venta`, `Mantenimiento`, `Servicio montacargas`, etc.) a `SOLU|SERV|MONT`.
+
+### 2) División de nombre/apellido para el contacto
+
+En SIC existen dos campos:
+
+- `#nombre_contacto`
+- `#apellido_contacto`
+
+Reglas aplicadas:
+
+- 1 palabra → solo nombre
+- 2 palabras → nombre + 1 apellido
+- 3 palabras → 1 nombre + 2 apellidos
+- 4 palabras → 2 nombres + 2 apellidos
+- >4 → fallback: primeras 2 como nombre, resto como apellidos
+
+Si `#apellido_contacto` no existe en el SIC, el bot **no rompe** el flujo (try/catch).
+
+### 3) Captura y persistencia del ticket generado
+
+Después de dar click a `#guardar_solicitudGestor`, el SIC redirige a `/SolicitudGestor`.
+
+- Se implementó validación en el listado para ubicar la fila por **NIT** (si existe) o por **Empresa**.
+- Se captura el valor de la columna **Ticket** y se persiste en Postgres en la columna `Ticket`.
+
+> Importante: para reducir fallos en producción, la búsqueda en el listado es resiliente (esperas + filtro + matching tolerante). Si no hay coincidencia exacta pero hay filas, usa la **primera fila** como fallback y registra un `[WARN]`.
+
+### 4) WhatsApp Web: envío de mensaje y sesión persistida
+
+Se implementó envío de mensajes por **WhatsApp Web** (Playwright):
+
+- La primera vez requiere escanear QR
+- Se persiste sesión en `storageState` (config `WhatsAppConfig:StorageStatePath`)
+- Se usa URL con parámetro `text`: `https://web.whatsapp.com/send?phone=<E164>&text=<mensaje>`
+- WhatsApp Web pre-rellena automáticamente el input
+- El bot solo presiona Enter para enviar (sin duplicación)
+
+**Ver archivo `SOLUCION_FINAL_WHATSAPP.md`** para detalles técnicos completos.
+
+### 5) Arreglo: error EF/Postgres por columnas faltantes
+
+**Síntoma:**
+
+- `42703: column "EstadoAutomatizacion" of relation "Registros" does not exist`
+
+**Causa:**
+
+- El modelo `Registro` tenía campos nuevos, pero la BD no se actualizó.
+- La migración `AddAutomationStatusFields` quedó vacía.
+
+**Solución:**
+
+- Crear y aplicar migración `FixAutomationStatusFields` y correr:
+
+```bash
+dotnet ef database update
+```
+
+### 6) Arreglo: error de compilación (atributos duplicados) por carpeta `Tools/`
+
+**Síntoma (CS0579):**
+
+- `Duplicate 'TargetFrameworkAttribute'` y varios `Duplicate 'Assembly...'`.
+
+**Causa:**
+
+- El proyecto web estaba incluyendo accidentalmente fuentes/obj de `Tools/` en la compilación.
+
+**Solución:**
+
+- En `AutomationAPI.csproj` se eliminó la inclusión del proyecto/herramientas y se excluyó `Tools/**` de `Compile/Content/None`.
+- Recomendado tras ese cambio:
+
+```bash
+dotnet clean
+rm -rf bin obj
+```

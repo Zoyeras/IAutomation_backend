@@ -3,6 +3,7 @@ using System;
 using AutomationAPI.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace AutomationAPI.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260210194930_AddContactoAsignadoLineaVenta")]
+    partial class AddContactoAsignadoLineaVenta
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -58,13 +61,6 @@ namespace AutomationAPI.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<string>("EstadoAutomatizacion")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTime>("FechaActualizacion")
-                        .HasColumnType("timestamp with time zone");
-
                     b.Property<DateTime>("FechaCreacion")
                         .HasColumnType("timestamp with time zone");
 
@@ -80,15 +76,8 @@ namespace AutomationAPI.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<string>("Ticket")
-                        .IsRequired()
-                        .HasColumnType("text");
-
                     b.Property<string>("TipoCliente")
                         .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("UltimoErrorAutomatizacion")
                         .HasColumnType("text");
 
                     b.HasKey("Id");
