@@ -737,8 +737,6 @@ public class AutomationService : IAutomationService
         return $"Muchas gracias por la información {saludo} {nombre}, la solicitud acaba de ser compartida con un asesor el cual le contactara pronto, tenga excelente dia, cualquier duda estoy atento";
     }
 
-    // ...existing code...
-
     private async Task EnviarWhatsAppWebAsync(string sendToE164, string message)
     {
         var waBaseUrl = _configuration["WhatsAppConfig:BaseUrl"] ?? "https://web.whatsapp.com";
@@ -1074,18 +1072,52 @@ public class AutomationService : IAutomationService
 
         await searchBox.PressSequentiallyAsync(name, new LocatorPressSequentiallyOptions { Delay = 10 });
 
-        // Primer resultado
-        var firstResult = page.Locator("div[role='listbox'] [role='option']").First;
-        if (await firstResult.CountAsync() == 0)
+        await Task.Delay(1000);
+
+        var exactTitle = page.Locator($"span[title='{name}']").First;
+        if (await exactTitle.CountAsync() > 0)
         {
-            firstResult = page.Locator("div[aria-label='Lista de chats'] div[role='row']").First;
+            await exactTitle.ClickAsync();
+        }
+        else
+        {
+            var firstResult = page.Locator("div[role='listbox'] [role='option']").First;
+            if (await firstResult.CountAsync() > 0)
+            {
+                await firstResult.ClickAsync();
+            }
+            else
+            {
+                await searchBox.PressAsync("ArrowDown");
+                await Task.Delay(500);
+                await searchBox.PressAsync("Enter");
+            }
         }
 
-        await firstResult.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-        await firstResult.ClickAsync();
+        await Task.Delay(3000);
 
         // Composer y envío por renglones
-        var composer = page.Locator("div[contenteditable='true'][data-tab]" );
+        var composerSelectors = new[]
+        {
+            "div[contenteditable='true'][data-tab]",
+            "div[contenteditable='true'][role='textbox']",
+            "[contenteditable='true']"
+        };
+
+        ILocator? composer = null;
+        foreach (var selector in composerSelectors)
+        {
+            var loc = page.Locator(selector);
+            if (await loc.CountAsync() > 0)
+            {
+                composer = loc.Last;
+                break;
+            }
+        }
+
+        if (composer == null)
+            throw new InvalidOperationException("No se encontró el input de mensaje (composer)");
+
         await composer.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 60000 });
         await composer.ClickAsync();
 
@@ -1100,7 +1132,8 @@ public class AutomationService : IAutomationService
         }
 
         await composer.PressAsync("Enter");
-        Console.WriteLine($"[WA] Mensaje enviado al grupo/chat (primer resultado): {name}");
+        await Task.Delay(5000);
+        Console.WriteLine($"[WA] Mensaje enviado al grupo/chat: {name}");
 
         await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
     }
@@ -1228,6 +1261,7 @@ public class AutomationService : IAutomationService
         }
 
         await composer.PressAsync("Enter");
+        await Task.Delay(5000);
         Console.WriteLine($"[WA] Mensaje enviado al contacto: {nombreCliente} ({celularNormalizado})");
 
         await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
