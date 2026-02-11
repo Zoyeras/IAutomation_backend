@@ -156,7 +156,28 @@ public class AutomationService : IAutomationService
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[BOT] Error enviando WhatsApp: {ex.Message}");
+                Console.WriteLine($"[BOT] Error enviando WhatsApp al grupo: {ex.Message}");
+            }
+
+            // Segundo envío: Mensaje personalizado al celular del cliente
+            try
+            {
+                var celularCliente = registro.Celular ?? "";
+                var nombreCliente = registro.Cliente ?? "";
+
+                if (!string.IsNullOrWhiteSpace(celularCliente) && !string.IsNullOrWhiteSpace(nombreCliente))
+                {
+                    var mensajePersonalizado = ConstruirMensajePersonalizadoCliente(nombreCliente);
+                    await EnviarWhatsAppWebAContactoAsync(celularCliente, nombreCliente, mensajePersonalizado);
+                }
+                else
+                {
+                    Console.WriteLine("[BOT] Celular o nombre del cliente vacíos. Se omite envío personalizado al contacto.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[BOT] Error enviando WhatsApp personalizado al cliente: {ex.Message}");
             }
 
             Console.WriteLine("[BOT] Flujo completado.");
@@ -692,6 +713,32 @@ public class AutomationService : IAutomationService
                $"OBSERVACIÓN: {obs}";
     }
 
+    private static string ConstruirMensajePersonalizadoCliente(string nombreCliente)
+    {
+        var nombre = (nombreCliente ?? string.Empty).Trim();
+        
+        // Determinar si es Sr. o Sra. (análisis muy básico del primer nombre)
+        var primerNombre = nombre.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+        var saludo = "sr/sra";
+        
+        // Heurística simple: nombres típicamente femeninos en español
+        var nombresF = new[] { "MARIA", "PAOLA", "CAROLINA", "ALEJANDRA", "JESSICA", "LAURA", "Ana", "ROSA", "DIANA", "SOFIA" };
+        var nombreNormalizado = primerNombre.ToUpper();
+        
+        if (nombresF.Any(n => nombreNormalizado.StartsWith(n)))
+        {
+            saludo = "Sra";
+        }
+        else if (nombreNormalizado.Length > 0)
+        {
+            saludo = "Sr";
+        }
+
+        return $"Muchas gracias por la información {saludo} {nombre}, la solicitud acaba de ser compartida con un asesor el cual le contactara pronto, tenga excelente dia, cualquier duda estoy atento";
+    }
+
+    // ...existing code...
+
     private async Task EnviarWhatsAppWebAsync(string sendToE164, string message)
     {
         var waBaseUrl = _configuration["WhatsAppConfig:BaseUrl"] ?? "https://web.whatsapp.com";
@@ -1054,6 +1101,134 @@ public class AutomationService : IAutomationService
 
         await composer.PressAsync("Enter");
         Console.WriteLine($"[WA] Mensaje enviado al grupo/chat (primer resultado): {name}");
+
+        await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
+    }
+
+    private async Task EnviarWhatsAppWebAContactoAsync(string celular, string nombreCliente, string message)
+    {
+        var waBaseUrl = _configuration["WhatsAppConfig:BaseUrl"] ?? "https://web.whatsapp.com";
+        var storageStatePathCfg = _configuration["WhatsAppConfig:StorageStatePath"] ?? "whatsapp.storage.json";
+        var ensureLoginTimeoutSeconds = int.TryParse(_configuration["WhatsAppConfig:EnsureLoginTimeoutSeconds"], out var t) ? t : 90;
+
+        var contentRoot = _configuration[WebHostDefaults.ContentRootKey] ?? Directory.GetCurrentDirectory();
+        var storageStatePath = Path.IsPathRooted(storageStatePathCfg)
+            ? storageStatePathCfg
+            : Path.Combine(contentRoot, storageStatePathCfg);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(storageStatePath) ?? contentRoot);
+
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        {
+            Headless = false,
+            SlowMo = 200
+        });
+
+        var contextOptions = new BrowserNewContextOptions();
+        if (File.Exists(storageStatePath))
+        {
+            contextOptions.StorageStatePath = storageStatePath;
+        }
+
+        var context = await browser.NewContextAsync(contextOptions);
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync(waBaseUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+        await AsegurarLoginWhatsAppAsync(page, context, storageStatePath, TimeSpan.FromSeconds(ensureLoginTimeoutSeconds));
+
+        var celularNormalizado = (celular ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(celularNormalizado))
+            throw new InvalidOperationException("Celular del cliente vacío");
+
+        // Buscar chat por celular usando la barra de búsqueda
+        var searchBoxCandidates = new[]
+        {
+            "div[contenteditable='true'][data-tab='3']",
+            "div[contenteditable='true'][data-tab='4']",
+            "div[contenteditable='true'][data-tab='5']",
+            "div[contenteditable='true'][role='textbox']"
+        };
+
+        ILocator? searchBox = null;
+        foreach (var sel in searchBoxCandidates)
+        {
+            var loc = page.Locator(sel).First;
+            if (await loc.CountAsync() > 0)
+            {
+                searchBox = loc;
+                break;
+            }
+        }
+
+        if (searchBox == null)
+            throw new InvalidOperationException("No se encontró el buscador de chats en WhatsApp Web.");
+
+        Console.WriteLine($"[WA] Buscando contacto: {celularNormalizado}");
+        
+        await searchBox.ClickAsync();
+        await Task.Delay(500);
+        
+        // Limpiar el buscador
+        try { await searchBox.PressAsync("Control+A"); await searchBox.PressAsync("Delete"); } catch { /* no-op */ }
+        await Task.Delay(300);
+        
+        // Escribir el celular
+        await searchBox.PressSequentiallyAsync(celularNormalizado, new LocatorPressSequentiallyOptions { Delay = 50 });
+        
+        // Esperar a que los resultados aparezcan
+        Console.WriteLine("[WA] Esperando resultados de búsqueda...");
+        await Task.Delay(2000);
+
+        // Presionar ArrowDown y Enter para seleccionar el primer resultado
+        Console.WriteLine("[WA] Presionando ArrowDown para seleccionar primer resultado...");
+        await searchBox.PressAsync("ArrowDown");
+        await Task.Delay(500);
+        
+        Console.WriteLine("[WA] Presionando Enter para abrir el chat...");
+        await searchBox.PressAsync("Enter");
+        
+        // Esperar a que el chat se cargue completamente
+        Console.WriteLine("[WA] Esperando a que el chat se cargue...");
+        await Task.Delay(3000);
+
+        // Encontrar el compositor y escribir mensaje por líneas
+        var composerSelectors = new[]
+        {
+            "div[contenteditable='true'][data-tab]",
+            "div[contenteditable='true'][role='textbox']",
+            "[contenteditable='true']"
+        };
+
+        ILocator? composer = null;
+        foreach (var selector in composerSelectors)
+        {
+            var loc = page.Locator(selector);
+            if (await loc.CountAsync() > 0)
+            {
+                composer = loc.Last;
+                break;
+            }
+        }
+
+        if (composer == null)
+            throw new InvalidOperationException("No se encontró el input de mensaje (composer)");
+
+        await composer.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 60000 });
+        await composer.ClickAsync();
+
+        var lines = (message ?? string.Empty).Replace("\r\n", "\n").Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            if (!string.IsNullOrEmpty(line))
+                await composer.PressSequentiallyAsync(line, new LocatorPressSequentiallyOptions { Delay = 10 });
+            if (i < lines.Length - 1)
+                await composer.PressAsync("Shift+Enter");
+        }
+
+        await composer.PressAsync("Enter");
+        Console.WriteLine($"[WA] Mensaje enviado al contacto: {nombreCliente} ({celularNormalizado})");
 
         await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
     }

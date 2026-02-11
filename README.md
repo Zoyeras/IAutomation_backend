@@ -7,6 +7,9 @@ API REST en **ASP.NET Core (.NET 10)** que:
 1. Recibe un registro (ticket) desde un frontend (por ejemplo React).
 2. Guarda el registro en **PostgreSQL** usando **Entity Framework Core**.
 3. Ejecuta una automatización web con **Microsoft Playwright** para crear un ticket en el **SIC** (portal web externo).
+4. **[NUEVO v2.1]** Envía dos mensajes por WhatsApp: uno al grupo "Tickets Soluciones" y otro personalizado al cliente.
+
+> Proyecto ubicado en: `Backend/AutomationAPI`
 
 > Proyecto ubicado en: `Backend/AutomationAPI`
 
@@ -22,6 +25,7 @@ API REST en **ASP.NET Core (.NET 10)** que:
 - [Instalación y ejecución](#instalación-y-ejecución)
 - [Migraciones / Base de datos](#migraciones--base-de-datos)
 - [Playwright (instalación de browsers)](#playwright-instalación-de-browsers)
+- [**WhatsApp Automation v2.1 (Cambios)**](#whatsapp-automation-v21-cambios) ⭐ **NUEVO**
 - [Troubleshooting](#troubleshooting)
   - [Error: NullReferenceException al leer opciones del select de Ciudad](#error-nullreferenceexception-al-leer-opciones-del-select-de-ciudad)
   - [Error: column "EstadoAutomatizacion" of relation "Registros" does not exist](#error-column-estadoautomatizacion-of-relation-registros-does-not-exist)
@@ -297,6 +301,179 @@ cd Backend/AutomationAPI
 dotnet build
 pwsh ./bin/Debug/net10.0/playwright.ps1 install
 ```
+
+---
+
+## WhatsApp Automation v2.1 (Cambios)
+
+### Resumen de cambios principales
+
+**Versión 2.1 (11 de febrero 2026):** Implementación de **doble envío a WhatsApp**
+
+#### Antes (v2.0)
+- Enviaba un solo mensaje al **celular del cliente** (número de teléfono)
+
+#### Ahora (v2.1)
+- **Primer envío:** Grupo "Tickets Soluciones" → Información del ticket para el equipo
+- **Segundo envío:** Celular del cliente → Mensaje personalizado con saludo cortés
+
+**Ejemplo de mensajes:**
+```
+[GRUPO] Buen día, asignación de
+TICKET N° 123456
+NIT: 123456789
+RAZÓN SOCIAL: Mi Empresa
+NOMBRE DE CONTACTO: Juan Pérez
+TELÉFONO DE CONTACTO: 3105003030
+CIUDAD: Bogota
+OBSERVACIÓN: Descripción de la solicitud
+
+[CLIENTE] Muchas gracias por la información Sr Juan Pérez, 
+la solicitud acaba de ser compartida con un asesor el cual 
+le contactara pronto, tenga excelente dia, cualquier duda 
+estoy atento
+```
+
+---
+
+### Errores encontrados y soluciones
+
+#### ❌ Error 1: Click en resultados de búsqueda no funcionaba
+**Problema:** El bot escribía el nombre del grupo en la barra de búsqueda, pero el click no abría el chat.  
+**Solución:** Usar navegación por teclado (`ArrowDown` + `Enter`) en lugar de clicks en el DOM.
+
+```csharp
+// ❌ No funcionaba:
+await firstResult.ClickAsync();
+
+// ✅ Funciona:
+await searchBox.PressAsync("ArrowDown");
+await searchBox.PressAsync("Enter");
+```
+
+**Por qué funciona:** La navegación por teclado es más confiable contra cambios en la UI de WhatsApp Web.
+
+#### ❌ Error 2: Escribía en barra de búsqueda (no en el chat)
+**Problema:** El selector `[contenteditable='true']` coincidía con múltiples elementos (barra de búsqueda e input del chat).  
+**Solución:** Usar `.Last` en lugar de `.First` para seleccionar el compositor del chat abierto.
+
+```csharp
+// ❌ Tomaba el primero (barra de búsqueda):
+composer = locator.First;
+
+// ✅ Toma el último (input del chat):
+composer = locator.Last;
+```
+
+**Mejora adicional:** Esperar 3 segundos después de abrir el chat para que WhatsApp Web renderice completamente.
+
+#### ❌ Error 3: Conflicto de compilación (top-level statements)
+**Problema:** Error `CS8802: Only one compilation unit can have top-level statements`.  
+**Causa:** Crear múltiples archivos `.cs` con top-level statements en el mismo proyecto.  
+**Solución:** Eliminar archivo conflictivo y consolidar tests en `Program.cs` con argumentos de línea de comandos.
+
+---
+
+### Nuevos métodos implementados
+
+#### 1. `EnviarWhatsAppWebAGrupoAsync()`
+Envía un mensaje a un grupo de WhatsApp.
+```csharp
+await EnviarWhatsAppWebAGrupoAsync("Tickets Soluciones", mensajeGrupo);
+```
+
+#### 2. `EnviarWhatsAppWebAContactoAsync()`
+Envía un mensaje personalizado al celular de un cliente.
+```csharp
+await EnviarWhatsAppWebAContactoAsync(celular, nombreCliente, mensajePersonalizado);
+```
+
+#### 3. `ConstruirMensajePersonalizadoCliente()`
+Construye el mensaje personalizado con saludo automático (Sr./Sra.).
+```csharp
+var msg = ConstruirMensajePersonalizadoCliente("Juan Pérez");
+// Retorna: "Muchas gracias por la información Sr Juan Pérez..."
+```
+
+---
+
+### Características nuevas
+
+✅ **Búsqueda por navegación de teclado** - Más robusta que selectores específicos  
+✅ **Detección automática de Sr./Sra.** - Basada en análisis del primer nombre  
+✅ **Persistencia mejorada de sesión** - Se guarda después de cada envío en `whatsapp.storage.json`  
+✅ **Logs descriptivos** - Cada paso imprime información clara en consola  
+✅ **Manejo independiente de errores** - Un envío fallido no bloquea al otro  
+
+---
+
+### Testing
+
+```bash
+# Test solo grupo
+dotnet run -- --test-whatsapp
+
+# Test dos mensajes (recomendado) ⭐
+dotnet run -- --test-whatsapp-dos-mensajes
+
+# API completa
+dotnet run
+```
+
+**Salida esperada del test dos mensajes:**
+```
+📤 ENVIANDO MENSAJE 1 AL GRUPO 'Tickets Soluciones'
+   ✓ Mensaje escrito y enviado al grupo
+
+📤 ENVIANDO MENSAJE 2 AL CLIENTE (3105003030)
+   ✓ Mensaje escrito y enviado a Juan Pérez
+
+✅ PRUEBA COMPLETADA EXITOSAMENTE
+```
+
+---
+
+### Configuración requerida
+
+Asegúrate de que `appsettings.json` tenga la configuración de WhatsApp:
+
+```json
+"WhatsAppConfig": {
+  "BaseUrl": "https://web.whatsapp.com",
+  "GroupName": "Tickets Soluciones",           // Nombre del grupo
+  "StorageStatePath": "whatsapp.storage.json", // Persistencia de sesión
+  "EnsureLoginTimeoutSeconds": 90              // Timeout para escanear QR
+}
+```
+
+---
+
+### Flujo de ejecución
+
+```
+[Crear Solicitud en SIC]
+        ↓
+[Obtener Ticket]
+        ↓
+[ENVÍO 1] → Grupo "Tickets Soluciones"
+        │   (info del ticket)
+        ↓
+[ENVÍO 2] → Celular del cliente
+        │   (mensaje personalizado)
+        ↓
+[Guardar sesión]
+        ↓
+[FIN]
+```
+
+---
+
+### Archivos modificados
+
+- `Services/AutomationService.cs` - Nuevos métodos de envío a WhatsApp
+- `Program.cs` - Test `--test-whatsapp-dos-mensajes`
+- `appsettings.json` - Campo `GroupName` en WhatsAppConfig
+- `appsettings.Example.json` - Campo `GroupName` en WhatsAppConfig
 
 ---
 
