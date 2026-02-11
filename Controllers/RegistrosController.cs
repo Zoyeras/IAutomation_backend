@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using AutomationAPI.Data;
 using AutomationAPI.Models;
 using AutomationAPI.Services; // <-- IMPORTANTE: Este puente es necesario
+using Microsoft.EntityFrameworkCore;
 
 namespace AutomationAPI.Controllers;
 
@@ -9,12 +10,12 @@ namespace AutomationAPI.Controllers;
 [Route("api/[controller]")]
 public class RegistrosController : ControllerBase
 {
-    private readonly AppDbContext _context;
+    private readonly IDbContextFactory<AppDbContext> _dbContextFactory;
     private readonly IAutomationService _automationService; // <-- Solo una vez
 
-    public RegistrosController(AppDbContext context, IAutomationService automationService)
+    public RegistrosController(IDbContextFactory<AppDbContext> dbContextFactory, IAutomationService automationService)
     {
-        _context = context;
+        _dbContextFactory = dbContextFactory;
         _automationService = automationService;
     }
 
@@ -40,8 +41,9 @@ public class RegistrosController : ControllerBase
 
         Console.WriteLine($"[API] POST Registro: Nit={registro.Nit}, Empresa={registro.Empresa}, MedioContacto='{registro.MedioContacto}', AsignadoA='{registro.AsignadoA}', LineaVenta='{registro.LineaVenta}'");
 
-        _context.Registros.Add(registro);
-        await _context.SaveChangesAsync();
+        await using var context = await _dbContextFactory.CreateDbContextAsync();
+        context.Registros.Add(registro);
+        await context.SaveChangesAsync();
 
         // Disparamos Playwright en segundo plano
         _ = _automationService.ExecuteWebAutomation(registro);
