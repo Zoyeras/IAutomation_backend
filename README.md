@@ -26,6 +26,7 @@ API REST en **ASP.NET Core (.NET 10)** que:
 - [Migraciones / Base de datos](#migraciones--base-de-datos)
 - [Playwright (instalación de browsers)](#playwright-instalación-de-browsers)
 - [**WhatsApp Automation v2.1 (Cambios)**](#whatsapp-automation-v21-cambios) ⭐ **NUEVO**
+- [**Testing / Pruebas**](#testing--pruebas) 📋 (Referencia histórica)
 - [Troubleshooting](#troubleshooting)
   - [Error: NullReferenceException al leer opciones del select de Ciudad](#error-nullreferenceexception-al-leer-opciones-del-select-de-ciudad)
   - [Error: column "EstadoAutomatizacion" of relation "Registros" does not exist](#error-column-estadoautomatizacion-of-relation-registros-does-not-exist)
@@ -474,6 +475,88 @@ Asegúrate de que `appsettings.json` tenga la configuración de WhatsApp:
 - `Program.cs` - Test `--test-whatsapp-dos-mensajes`
 - `appsettings.json` - Campo `GroupName` en WhatsAppConfig
 - `appsettings.Example.json` - Campo `GroupName` en WhatsAppConfig
+
+---
+
+## Testing / Pruebas
+
+> ⚠️ **NOTA:** La API está configurada para **producción** (`dotnet run` inicia el servidor normalmente).
+> Las siguientes secciones documenta cómo ejecutar tests, ahora disponibles solo como comandos históricos.
+
+### Datos de prueba (Referencia)
+
+Para referencia, estos eran los datos de prueba utilizados durante el desarrollo:
+
+```csharp
+// Cliente de prueba
+string nombreCliente = "Juan Pérez";
+string celularCliente = "3105003030";
+
+// Ticket de prueba
+string ticketPrueba = "999999";
+string nitPrueba = "900000000";
+string razonSocialPrueba = "TEST PRUEBA";
+string ciudadPrueba = "Bogota";
+
+// Mensaje de prueba al grupo
+string mensajeGrupo = @"Buen día, asignación de
+TICKET N° 999999
+NIT: 900000000
+RAZÓN SOCIAL: TEST PRUEBA
+NOMBRE DE CONTACTO: Juan Pérez
+TELÉFONO DE CONTACTO: 3105003030
+CIUDAD: Bogota
+OBSERVACIÓN: MENSAJE DE PRUEBA DOS ENVÍOS";
+
+// Mensaje de prueba al cliente
+string mensajeCliente = "Muchas gracias por la información sr Juan Pérez, " +
+    "la solicitud acaba de ser compartida con un asesor el cual le contactara pronto, " +
+    "tenga excelente dia, cualquier duda estoy atento";
+```
+
+### Comandos de prueba (Histórico)
+
+Durante el desarrollo se utilizaban estos comandos para validar la funcionalidad:
+
+```bash
+# Test 1: Solo envío al grupo
+dotnet run -- --test-whatsapp
+
+# Test 2: Doble envío (grupo + cliente)
+dotnet run -- --test-whatsapp-dos-mensajes
+
+# API en modo producción (actual)
+dotnet run
+```
+
+### Flujo de testing utilizado
+
+1. **Primero:** Se testeaba la búsqueda y envío al grupo
+2. **Luego:** Se testeaba el envío personalizado al cliente
+3. **Finally:** Se validaba que ambos mensajes se enviaran correctamente
+
+### En producción
+
+La API ahora funciona en **modo producción completo**:
+
+```bash
+# Inicia el servidor REST normalmente
+$ dotnet run
+
+# El servidor escuchará en https://localhost:5001
+# Endpoints disponibles:
+#   GET    /api/registros
+#   POST   /api/registros
+#   GET    /api/registros/{id}
+```
+
+Cuando se crea un registro via `POST /api/registros`, automáticamente:
+1. Se guarda en PostgreSQL
+2. Se abre el navegador y rellena el formulario del SIC
+3. Se obtiene el ticket
+4. Se envía mensaje al grupo "Tickets Soluciones"
+5. Se envía mensaje personalizado al cliente
+6. Se guarda el estado en la BD
 
 ---
 
