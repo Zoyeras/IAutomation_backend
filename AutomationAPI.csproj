@@ -5,6 +5,9 @@
   <Nullable>enable</Nullable>
   <ImplicitUsings>enable</ImplicitUsings>
   <AllowMissingPrunePackageData>true</AllowMissingPrunePackageData>
+  
+  <!-- Deshabilitar inclusión automática de archivos para evitar duplicados -->
+  <EnableDefaultContentItems>false</EnableDefaultContentItems>
 </PropertyGroup>
 
 <ItemGroup>
@@ -17,6 +20,13 @@
   <PackageReference Include="Microsoft.Playwright" Version="1.58.0" />
   <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
   <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.2" />
+</ItemGroup>
+
+<!-- Incluir archivos necesarios para el ejecutable -->
+<ItemGroup>
+  <Content Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  <Content Include="appsettings.*.json" CopyToOutputDirectory="PreserveNewest" />
+  <Content Include="wwwroot\**\*.*" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
 <!-- Tools/* es un proyecto separado. No debe compilarse dentro del backend web. -->
