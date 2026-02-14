@@ -13,11 +13,13 @@ public class AutomationService : IAutomationService
 {
     private readonly IConfiguration _configuration;
     private readonly IDbContextFactory<AppDbContext> _dbContextFactory;
+    private readonly IWebHostEnvironment _environment;
 
-    public AutomationService(IConfiguration configuration, IDbContextFactory<AppDbContext> dbContextFactory)
+    public AutomationService(IConfiguration configuration, IDbContextFactory<AppDbContext> dbContextFactory, IWebHostEnvironment environment)
     {
         _configuration = configuration;
         _dbContextFactory = dbContextFactory;
+        _environment = environment;
     }
 
     public async Task ExecuteWebAutomation(Registro registro)
@@ -133,52 +135,7 @@ public class AutomationService : IAutomationService
 
             await PersistirTicketAsync(registro.Id, ticketEncontrado);
 
-            // Enviar mensaje por WhatsApp (siempre, independientemente del medio de contacto)
-            try
-            {
-                var waGroupName = _configuration["WhatsAppConfig:GroupName"] ?? "";
-                var waTo = _configuration["WhatsAppConfig:SendTo"] ?? "";
-
-                if (!string.IsNullOrWhiteSpace(waGroupName))
-                {
-                    var mensaje = ConstruirMensajeWhatsApp(ticketEncontrado, registro);
-                    await EnviarWhatsAppWebAGrupoAsync(waGroupName, mensaje);
-                }
-                else if (!string.IsNullOrWhiteSpace(waTo))
-                {
-                    var mensaje = ConstruirMensajeWhatsApp(ticketEncontrado, registro);
-                    await EnviarWhatsAppWebAsync(waTo, mensaje);
-                }
-                else
-                {
-                    Console.WriteLine("[BOT] WhatsAppConfig sin destino (ni GroupName ni SendTo). Se omite envío WhatsApp.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[BOT] Error enviando WhatsApp al grupo: {ex.Message}");
-            }
-
-            // Segundo envío: Mensaje personalizado al celular del cliente
-            try
-            {
-                var celularCliente = registro.Celular ?? "";
-                var nombreCliente = registro.Cliente ?? "";
-
-                if (!string.IsNullOrWhiteSpace(celularCliente) && !string.IsNullOrWhiteSpace(nombreCliente))
-                {
-                    var mensajePersonalizado = ConstruirMensajePersonalizadoCliente(nombreCliente);
-                    await EnviarWhatsAppWebAContactoAsync(celularCliente, nombreCliente, mensajePersonalizado);
-                }
-                else
-                {
-                    Console.WriteLine("[BOT] Celular o nombre del cliente vacíos. Se omite envío personalizado al contacto.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[BOT] Error enviando WhatsApp personalizado al cliente: {ex.Message}");
-            }
+            await EnviarWhatsAppNotificacionesAsync(registro, ticketEncontrado);
 
             Console.WriteLine("[BOT] Flujo completado.");
 
@@ -737,43 +694,125 @@ public class AutomationService : IAutomationService
         return $"Muchas gracias por la información {saludo} {nombre}, la solicitud acaba de ser compartida con un asesor el cual le contactara pronto, tenga excelente dia, cualquier duda estoy atento";
     }
 
-    private async Task EnviarWhatsAppWebAsync(string sendToE164, string message)
+    private async Task EnviarWhatsAppNotificacionesAsync(Registro registro, string ticket)
     {
+        var waGroupName = _configuration["WhatsAppConfig:GroupName"] ?? "";
+        var waTo = _configuration["WhatsAppConfig:SendTo"] ?? "";
         var waBaseUrl = _configuration["WhatsAppConfig:BaseUrl"] ?? "https://web.whatsapp.com";
         var storageStatePathCfg = _configuration["WhatsAppConfig:StorageStatePath"] ?? "whatsapp.storage.json";
         var ensureLoginTimeoutSeconds = int.TryParse(_configuration["WhatsAppConfig:EnsureLoginTimeoutSeconds"], out var t) ? t : 90;
 
-        // IMPORTANTE (Linux/Windows): el storageState se guarda en el ContentRoot (carpeta del proyecto)
-        // para que no cambie entre ejecuciones (AppContext.BaseDirectory apunta a bin/... y puede variar).
-        var contentRoot = _configuration[WebHostDefaults.ContentRootKey] ?? Directory.GetCurrentDirectory();
-
+        // Usar ContentRootPath de IWebHostEnvironment (donde está el ejecutable)
+        var contentRoot = _environment.ContentRootPath;
         var storageStatePath = Path.IsPathRooted(storageStatePathCfg)
             ? storageStatePathCfg
             : Path.Combine(contentRoot, storageStatePathCfg);
 
         Directory.CreateDirectory(Path.GetDirectoryName(storageStatePath) ?? contentRoot);
+        Console.WriteLine($"[WA] Storage path: {storageStatePath}");
+        Console.WriteLine($"[WA] Storage exists: {File.Exists(storageStatePath)}");
 
         using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-        {
-            Headless = false,
-            SlowMo = 200
-        });
 
-        var contextOptions = new BrowserNewContextOptions();
         if (File.Exists(storageStatePath))
         {
-            contextOptions.StorageStatePath = storageStatePath;
+            // Validar que el archivo sea JSON válido
+            try
+            {
+                var fileContent = await File.ReadAllTextAsync(storageStatePath);
+                
+                // Si está vacío o es muy pequeño (< 50 bytes), probablemente está corrupto
+                if (string.IsNullOrWhiteSpace(fileContent) || fileContent.Length < 50)
+                {
+                    Console.WriteLine($"[WA] ⚠️ Storage corrupto o vacío ({fileContent.Length} bytes). Borrando...");
+                    File.Delete(storageStatePath);
+                }
+                else
+                {
+                    // Intentar parsear como JSON
+                    JsonDocument.Parse(fileContent);
+                    Console.WriteLine($"[WA] ✓ Storage válido ({fileContent.Length} bytes)");
+                }
+            }
+            catch (JsonException ex)
+            {
+                Console.WriteLine($"[WA] ⚠️ Storage JSON inválido: {ex.Message}. Borrando...");
+                File.Delete(storageStatePath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WA] ⚠️ Error validando storage: {ex.Message}. Continuando sin sesión...");
+            }
         }
 
-        var context = await browser.NewContextAsync(contextOptions);
-        var page = await context.NewPageAsync();
+        var waProfileDir = Path.Combine(contentRoot, "wa-profile");
+        Directory.CreateDirectory(waProfileDir);
+        Console.WriteLine($"[WA] Profile dir: {waProfileDir}");
+
+        await using var context = await playwright.Chromium.LaunchPersistentContextAsync(
+            waProfileDir,
+            new BrowserTypeLaunchPersistentContextOptions
+            {
+                Headless = false,
+                SlowMo = 200
+            }
+        );
+
+        var page = context.Pages.Count > 0 ? context.Pages[0] : await context.NewPageAsync();
 
         await page.GotoAsync(waBaseUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+        try { await page.BringToFrontAsync(); } catch { /* no-op */ }
 
-        // Si no está logueado, pedimos al usuario escanear y guardamos storageState.
         await AsegurarLoginWhatsAppAsync(page, context, storageStatePath, TimeSpan.FromSeconds(ensureLoginTimeoutSeconds));
+        try { await page.BringToFrontAsync(); } catch { /* no-op */ }
 
+        // Envío principal (grupo o número)
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(waGroupName))
+            {
+                var mensaje = ConstruirMensajeWhatsApp(ticket, registro);
+                await EnviarWhatsAppWebAGrupoEnPaginaAsync(page, context, storageStatePath, waGroupName, mensaje);
+            }
+            else if (!string.IsNullOrWhiteSpace(waTo))
+            {
+                var mensaje = ConstruirMensajeWhatsApp(ticket, registro);
+                await EnviarWhatsAppWebEnPaginaAsync(page, context, storageStatePath, waTo, mensaje);
+            }
+            else
+            {
+                Console.WriteLine("[BOT] WhatsAppConfig sin destino (ni GroupName ni SendTo). Se omite envío WhatsApp.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT] Error enviando WhatsApp principal: {ex.Message}");
+        }
+
+        // Segundo envío: mensaje personalizado al celular del cliente
+        try
+        {
+            var celularCliente = registro.Celular ?? "";
+            var nombreCliente = registro.Cliente ?? "";
+
+            if (!string.IsNullOrWhiteSpace(celularCliente) && !string.IsNullOrWhiteSpace(nombreCliente))
+            {
+                var mensajePersonalizado = ConstruirMensajePersonalizadoCliente(nombreCliente);
+                await EnviarWhatsAppWebAContactoEnPaginaAsync(page, context, storageStatePath, celularCliente, nombreCliente, mensajePersonalizado);
+            }
+            else
+            {
+                Console.WriteLine("[BOT] Celular o nombre del cliente vacíos. Se omite envío personalizado al contacto.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT] Error enviando WhatsApp personalizado al cliente: {ex.Message}");
+        }
+    }
+
+    private async Task EnviarWhatsAppWebEnPaginaAsync(IPage page, IBrowserContext context, string storageStatePath, string sendToE164, string message)
+    {
         // Forzamos flujo web (evita whatsapp://send en Linux)
         var to = NormalizarTelefonoE164(sendToE164);
         var encoded = Uri.EscapeDataString(message);
@@ -1003,42 +1042,11 @@ public class AutomationService : IAutomationService
         await Task.Delay(3000);
 
         // Guardamos sesión nuevamente por si cambió.
-        await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
-        Console.WriteLine($"[WA] ✓ storageState actualizado: {storageStatePath}");
+        await GuardarSesionWhatsAppAsync(context, storageStatePath);
     }
 
-    private async Task EnviarWhatsAppWebAGrupoAsync(string groupName, string message)
+    private async Task EnviarWhatsAppWebAGrupoEnPaginaAsync(IPage page, IBrowserContext context, string storageStatePath, string groupName, string message)
     {
-        var waBaseUrl = _configuration["WhatsAppConfig:BaseUrl"] ?? "https://web.whatsapp.com";
-        var storageStatePathCfg = _configuration["WhatsAppConfig:StorageStatePath"] ?? "whatsapp.storage.json";
-        var ensureLoginTimeoutSeconds = int.TryParse(_configuration["WhatsAppConfig:EnsureLoginTimeoutSeconds"], out var t) ? t : 90;
-
-        var contentRoot = _configuration[WebHostDefaults.ContentRootKey] ?? Directory.GetCurrentDirectory();
-        var storageStatePath = Path.IsPathRooted(storageStatePathCfg)
-            ? storageStatePathCfg
-            : Path.Combine(contentRoot, storageStatePathCfg);
-
-        Directory.CreateDirectory(Path.GetDirectoryName(storageStatePath) ?? contentRoot);
-
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-        {
-            Headless = false,
-            SlowMo = 200
-        });
-
-        var contextOptions = new BrowserNewContextOptions();
-        if (File.Exists(storageStatePath))
-        {
-            contextOptions.StorageStatePath = storageStatePath;
-        }
-
-        var context = await browser.NewContextAsync(contextOptions);
-        var page = await context.NewPageAsync();
-
-        await page.GotoAsync(waBaseUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
-        await AsegurarLoginWhatsAppAsync(page, context, storageStatePath, TimeSpan.FromSeconds(ensureLoginTimeoutSeconds));
-
         var name = (groupName ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(name))
             throw new InvalidOperationException("WhatsAppConfig:GroupName vacío");
@@ -1135,41 +1143,11 @@ public class AutomationService : IAutomationService
         await Task.Delay(5000);
         Console.WriteLine($"[WA] Mensaje enviado al grupo/chat: {name}");
 
-        await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
+        await GuardarSesionWhatsAppAsync(context, storageStatePath);
     }
 
-    private async Task EnviarWhatsAppWebAContactoAsync(string celular, string nombreCliente, string message)
+    private async Task EnviarWhatsAppWebAContactoEnPaginaAsync(IPage page, IBrowserContext context, string storageStatePath, string celular, string nombreCliente, string message)
     {
-        var waBaseUrl = _configuration["WhatsAppConfig:BaseUrl"] ?? "https://web.whatsapp.com";
-        var storageStatePathCfg = _configuration["WhatsAppConfig:StorageStatePath"] ?? "whatsapp.storage.json";
-        var ensureLoginTimeoutSeconds = int.TryParse(_configuration["WhatsAppConfig:EnsureLoginTimeoutSeconds"], out var t) ? t : 90;
-
-        var contentRoot = _configuration[WebHostDefaults.ContentRootKey] ?? Directory.GetCurrentDirectory();
-        var storageStatePath = Path.IsPathRooted(storageStatePathCfg)
-            ? storageStatePathCfg
-            : Path.Combine(contentRoot, storageStatePathCfg);
-
-        Directory.CreateDirectory(Path.GetDirectoryName(storageStatePath) ?? contentRoot);
-
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-        {
-            Headless = false,
-            SlowMo = 200
-        });
-
-        var contextOptions = new BrowserNewContextOptions();
-        if (File.Exists(storageStatePath))
-        {
-            contextOptions.StorageStatePath = storageStatePath;
-        }
-
-        var context = await browser.NewContextAsync(contextOptions);
-        var page = await context.NewPageAsync();
-
-        await page.GotoAsync(waBaseUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
-        await AsegurarLoginWhatsAppAsync(page, context, storageStatePath, TimeSpan.FromSeconds(ensureLoginTimeoutSeconds));
-
         var celularNormalizado = (celular ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(celularNormalizado))
             throw new InvalidOperationException("Celular del cliente vacío");
@@ -1264,7 +1242,7 @@ public class AutomationService : IAutomationService
         await Task.Delay(5000);
         Console.WriteLine($"[WA] Mensaje enviado al contacto: {nombreCliente} ({celularNormalizado})");
 
-        await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
+        await GuardarSesionWhatsAppAsync(context, storageStatePath);
     }
 
     private static async Task AsegurarLoginWhatsAppAsync(IPage page, IBrowserContext context, string storageStatePath, TimeSpan timeout)
@@ -1276,9 +1254,8 @@ public class AutomationService : IAutomationService
             await searchBox.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 8000 });
             Console.WriteLine("[WA] Sesión de WhatsApp OK (ya logueado).");
 
-            // Aseguramos persistencia incluso cuando ya venía logueado
-            await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
-            Console.WriteLine($"[WA] storageState confirmado: {storageStatePath}");
+            // Guardar sesión y ESPERAR confirmación
+            await GuardarSesionWhatsAppAsync(context, storageStatePath);
             return;
         }
         catch
@@ -1290,8 +1267,40 @@ public class AutomationService : IAutomationService
 
         await searchBox.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = (float)timeout.TotalMilliseconds });
 
-        await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
-        Console.WriteLine($"[WA] Sesión guardada en: {storageStatePath}");
+        // Esperar un poco más para que se estabilice la sesión
+        await Task.Delay(2000);
+        
+        // Guardar sesión y ESPERAR confirmación
+        await GuardarSesionWhatsAppAsync(context, storageStatePath);
+    }
+
+    private static async Task GuardarSesionWhatsAppAsync(IBrowserContext context, string storageStatePath)
+    {
+        try
+        {
+            Console.WriteLine($"[WA] Guardando sesión en: {storageStatePath}");
+            await context.StorageStateAsync(new BrowserContextStorageStateOptions { Path = storageStatePath });
+            
+            // Esperar a que se escriba completamente a disco
+            await Task.Delay(1000);
+            
+            // Validar que se escribió correctamente
+            if (File.Exists(storageStatePath))
+            {
+                var fileInfo = new FileInfo(storageStatePath);
+                if (fileInfo.Length > 100)
+                {
+                    Console.WriteLine($"[WA] ✓ Sesión guardada exitosamente ({fileInfo.Length} bytes)");
+                    return;
+                }
+            }
+            
+            Console.WriteLine($"[WA] ⚠️ Archivo de sesión no se escribió correctamente o está vacío");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[WA] ❌ Error guardando sesión: {ex.Message}");
+        }
     }
 
     private static string NormalizarTelefonoE164(string raw)

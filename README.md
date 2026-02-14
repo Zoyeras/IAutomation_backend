@@ -91,7 +91,11 @@ Notas importantes:
 
 - Para evitar que en Linux el navegador intente abrir el esquema `whatsapp://send` (que puede fallar por falta de handler), el bot abre el chat usando **solo web**:
   - `https://web.whatsapp.com/send?phone=<E164>&text=<mensaje>`
-- El `storageState` se guarda en el **ContentRoot** del proyecto (no en `bin/Debug/...`) para que realmente persista entre ejecuciones.
+- **[IMPORTANTE - v2.2]** El `storageState` (sesión de WhatsApp) se guarda en el **ContentRootPath** del `IWebHostEnvironment` (siempre relativo a donde esté el ejecutable `.exe` o script de ejecución). Esto asegura que:
+  - Si ejecutas desde `C:\publish\AutomationAPI.exe` → se guarda en `C:\publish\whatsapp.storage.json`
+  - Si ejecutas desde un `.bat` en `C:\publish\start-autohjr360.bat` → busca en `C:\publish\whatsapp.storage.json`
+  - La sesión **persiste correctamente entre ejecuciones** sin importar de dónde abras el cmd/terminal
+- **[IMPORTANTE - v2.3]** WhatsApp requiere un **perfil persistente** para mantener la sesión real (IndexedDB/Service Worker). El bot usa `publish/wa-profile` y, si hay problemas de logout, borra `wa-profile` y `whatsapp.storage.json` y vuelve a escanear el QR.
 - Si configuras `WhatsAppConfig:GroupName`, el bot **enviará al grupo/chat** buscando por nombre en WhatsApp Web y haciendo click en **el primer resultado**.
   - Ejemplo: `"GroupName": "Tickets Soluciones"`
   - Si `GroupName` está vacío, se usa `SendTo` (número) como fallback.

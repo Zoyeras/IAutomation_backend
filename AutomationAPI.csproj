@@ -27,6 +27,9 @@
   <Content Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
   <Content Include="appsettings.*.json" CopyToOutputDirectory="PreserveNewest" />
   <Content Include="wwwroot\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+  <Content Include="start-autohjr360.bat" CopyToOutputDirectory="PreserveNewest" />
+  <Content Include="autohjr-playwright.ps1" CopyToOutputDirectory="PreserveNewest" />
+  <Content Include="install-playwright.bat" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
 <!-- Tools/* es un proyecto separado. No debe compilarse dentro del backend web. -->

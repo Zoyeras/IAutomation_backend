@@ -33,6 +33,9 @@ echo Presiona Ctrl+C para detener el servidor
 echo ====================================
 echo.
 
+REM Forzar puerto por defecto
+set ASPNETCORE_URLS=http://localhost:5016
+
 REM Ejecutar el servidor
 AutomationAPI.exe
 
