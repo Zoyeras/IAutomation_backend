@@ -16,6 +16,8 @@ REST API built with **ASP.NET Core (.NET 10)** that:
 ## Table of contents
 
 - [Architecture](#architecture)
+- [Duplicate search](#duplicate-search)
+- [Ticket creation validation](#ticket-creation-validation)
 - [Endpoints](#endpoints)
 - [Data model](#data-model)
 - [Configuration](#configuration)
@@ -50,6 +52,38 @@ Main components:
 
 ---
 
+## Duplicate search
+
+Before creating the ticket, the bot determines `TipoCliente` using an automated search in the requests list:
+
+1. By NIT (exact)
+2. By Company (tolerant)
+3. By Phone (exact)
+
+Rule:
+
+- If any match has a valid invoice, it sets `TipoCliente = "Antiguo"` and stops.
+- If no valid invoice is found, it sets `TipoCliente = "Nuevo"`.
+
+Technical details:
+
+- Uses the list filter (`input#nombre[name='buscar']`) and checks up to 2 pages (current + next).
+- Uses the row "Ver" link URL to open the ticket (href in actions column), not a constructed URL.
+- Validates the `#factura` field in the ticket view.
+
+---
+
+## Ticket creation validation
+
+After clicking `#guardar_solicitudGestor`, the bot validates the SweetAlert result to confirm ticket creation.
+
+- On success: continues the flow and keeps the message for the frontend.
+- On error: stops the flow, saves the message, and does not continue to ticket search or WhatsApp.
+
+Note: WhatsApp logic is unchanged; it only runs after successful ticket creation.
+
+---
+
 ## Short changelog (recent changes)
 
 ### Fix: DI error (scoped DbContextOptions vs singleton pool)
@@ -58,12 +92,12 @@ If running `dotnet run` failed with an error like:
 
 - `Cannot consume scoped service 'DbContextOptions<AppDbContext>' from singleton ... (DbContextPool/DbContextFactory)`
 
-The fix was to **avoid mixing** `AddDbContext(...)` with `AddDbContextFactory/AddPooledDbContextFactory` in a way that ends up registering `DbContextOptions<T>` as *scoped* while the pool/factory is *singleton*.
+The fix was to **avoid mixing** `AddDbContext(...)` with `AddDbContextFactory/AddPooledDbContextFactory` in a way that ends up registering `DbContextOptions<T>` as _scoped_ while the pool/factory is _singleton_.
 
 **Current recommended setup:**
 
 - Use `AddPooledDbContextFactory<AppDbContext>(...)` (safe for background jobs / singletons).
-- Register `AppDbContext` as *scoped* for controllers, created from the factory.
+- Register `AppDbContext` as _scoped_ for controllers, created from the factory.
 
 This is implemented in `Program.cs` (summary):
 
@@ -117,6 +151,22 @@ Persists the record and starts the automation in the background.
 
 ```json
 { "message": "Saved and automation started", "id": 38 }
+```
+
+### `GET /api/registros/{id}`
+
+Fetch automation status and message for frontend polling.
+
+**Response** (example):
+
+```json
+{
+  "id": 38,
+  "estado": "COMPLETADO",
+  "mensaje": "Correcto: Datos actualizados exitosamente",
+  "ticket": "16076",
+  "tipoCliente": "Antiguo"
+}
 ```
 
 ---
@@ -179,7 +229,7 @@ System requirements:
 
 ## Install and run
 
-1) Restore and build
+1. Restore and build
 
 ```bash
 cd Backend/AutomationAPI
@@ -187,7 +237,7 @@ dotnet restore
 dotnet build
 ```
 
-2) Configure `appsettings.json` (or use `appsettings.Development.json`)
+2. Configure `appsettings.json` (or use `appsettings.Development.json`)
 
 Suggested: copy from the example file:
 
@@ -195,7 +245,7 @@ Suggested: copy from the example file:
 cp appsettings.Example.json appsettings.Development.json
 ```
 
-3) Run
+3. Run
 
 ```bash
 dotnet run
@@ -233,14 +283,14 @@ dotnet tool install --global dotnet-ef
 
 ### Linux (recommended)
 
-1) Build first so Playwright scripts are generated:
+1. Build first so Playwright scripts are generated:
 
 ```bash
 cd Backend/AutomationAPI
 dotnet build
 ```
 
-2) Install system dependencies (recommended on Linux) and then install browsers:
+2. Install system dependencies (recommended on Linux) and then install browsers:
 
 ```bash
 ./bin/Debug/net10.0/playwright.sh install-deps
@@ -284,13 +334,16 @@ pwsh ./bin/Debug/net10.0/playwright.ps1 install
 **Version 2.1 (February 11, 2026):** Implementation of **dual WhatsApp messaging**
 
 #### Before (v2.0)
+
 - Sent a single message to **client's phone** (phone number)
 
 #### Now (v2.1)
+
 - **First send:** Group "Tickets Soluciones" → Ticket information for the team
 - **Second send:** Client's phone → Personalized message with courteous greeting
 
 **Example messages:**
+
 ```
 [GROUP] Good morning, assignment of
 TICKET No. 123456
@@ -301,8 +354,8 @@ CONTACT PHONE: 3105003030
 CITY: Bogota
 OBSERVATION: Request description
 
-[CLIENT] Thank you very much for the information Mr Juan Pérez, 
-the request has just been shared with an advisor who will contact 
+[CLIENT] Thank you very much for the information Mr Juan Pérez,
+the request has just been shared with an advisor who will contact
 you soon, have a great day, if you have any questions I'm here
 ```
 
@@ -311,6 +364,7 @@ you soon, have a great day, if you have any questions I'm here
 ### Errors found and solutions
 
 #### ❌ Error 1: Click on search results didn't work
+
 **Problem:** Bot typed the group name in the search bar, but clicking didn't open the chat.  
 **Solution:** Use keyboard navigation (`ArrowDown` + `Enter`) instead of DOM clicks.
 
@@ -326,6 +380,7 @@ await searchBox.PressAsync("Enter");
 **Why it works:** Keyboard navigation is more reliable against WhatsApp Web UI changes.
 
 #### ❌ Error 2: Typed in search bar (not in chat)
+
 **Problem:** Selector `[contenteditable='true']` matched multiple elements (search bar and chat input).  
 **Solution:** Use `.Last` instead of `.First` to select the open chat composer.
 
@@ -340,6 +395,7 @@ composer = locator.Last;
 **Additional improvement:** Wait 3 seconds after opening chat for WhatsApp Web to fully render.
 
 #### ❌ Error 3: Compilation conflict (top-level statements)
+
 **Problem:** Error `CS8802: Only one compilation unit can have top-level statements`.  
 **Cause:** Multiple `.cs` files with top-level statements in same project.  
 **Solution:** Remove conflicting file and consolidate tests in `Program.cs` with command-line arguments.
@@ -349,19 +405,25 @@ composer = locator.Last;
 ### New methods implemented
 
 #### 1. `EnviarWhatsAppWebAGrupoAsync()`
+
 Sends a message to a WhatsApp group.
+
 ```csharp
 await EnviarWhatsAppWebAGrupoAsync("Tickets Soluciones", groupMessage);
 ```
 
 #### 2. `EnviarWhatsAppWebAContactoAsync()`
+
 Sends a personalized message to a client's phone.
+
 ```csharp
 await EnviarWhatsAppWebAContactoAsync(phone, clientName, personalizedMessage);
 ```
 
 #### 3. `ConstruirMensajePersonalizadoCliente()`
+
 Builds the personalized message with automatic greeting (Mr./Ms.).
+
 ```csharp
 var msg = ConstruirMensajePersonalizadoCliente("Juan Pérez");
 // Returns: "Thank you very much for the information Mr Juan Pérez..."
@@ -375,7 +437,7 @@ var msg = ConstruirMensajePersonalizadoCliente("Juan Pérez");
 ✅ **Automatic Mr./Ms. detection** - Based on first name analysis  
 ✅ **Improved session persistence** - Saved after each send in `whatsapp.storage.json`  
 ✅ **Descriptive logs** - Each step prints clear console information  
-✅ **Independent error handling** - One send failure doesn't block the other  
+✅ **Independent error handling** - One send failure doesn't block the other
 
 ---
 
@@ -393,6 +455,7 @@ dotnet run
 ```
 
 **Expected output from two messages test:**
+
 ```
 📤 SENDING MESSAGE 1 TO GROUP 'Tickets Soluciones'
    ✓ Message written and sent to group
@@ -563,7 +626,7 @@ Rules:
 - 2 words → name + 1 last name
 - 3 words → 1 name + 2 last names
 - 4 words → 2 names + 2 last names
-- >4 → fallback: first 2 as name, rest as last names
+- > 4 → fallback: first 2 as name, rest as last names
 
 If `#apellido_contacto` does not exist in SIC, the bot won’t break the flow (try/catch).
 

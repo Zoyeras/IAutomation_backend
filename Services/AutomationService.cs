@@ -66,6 +66,8 @@ public class AutomationService : IAutomationService
         Directory.CreateDirectory(artifactsDir);
         var runId = $"{DateTime.UtcNow:yyyyMMdd_HHmmss}_{registro.Id}";
 
+        string? mensajeCreacion = null;
+
         try
         {
             Console.WriteLine("[BOT] Iniciando sesión en el sistema...");
@@ -134,8 +136,15 @@ public class AutomationService : IAutomationService
             // TIPO CLIENTE (dropdown nativo)
             await SeleccionarTipoClienteAsync(page, registro.TipoCliente);
 
-            // Guardar y crear ticket
-            await GuardarSolicitudAsync(page);
+            // Guardar y crear ticket (validar SweetAlert)
+            var resultadoGuardado = await GuardarSolicitudAsync(page);
+            if (!resultadoGuardado.Success)
+            {
+                throw new InvalidOperationException($"Error guardando solicitud: {resultadoGuardado.Message}");
+            }
+
+            mensajeCreacion = resultadoGuardado.Message;
+            await ActualizarEstadoAutomatizacionAsync(registro.Id, "EN_PROCESO", mensajeCreacion);
 
             // Validar en listado y capturar el TICKET real de la fila que corresponde
             var ticketEncontrado = await ValidarEnListadoYObtenerTicketAsync(page, baseUrl, registro.Nit ?? string.Empty, registro.Empresa ?? string.Empty);
@@ -147,7 +156,7 @@ public class AutomationService : IAutomationService
 
             Console.WriteLine("[BOT] Flujo completado.");
 
-            await ActualizarEstadoAutomatizacionAsync(registro.Id, "COMPLETADO", null);
+            await ActualizarEstadoAutomatizacionAsync(registro.Id, "COMPLETADO", mensajeCreacion);
 
             await Task.Delay(30000);
         }
@@ -787,7 +796,7 @@ public class AutomationService : IAutomationService
         };
     }
 
-    private static async Task GuardarSolicitudAsync(IPage page)
+    private static async Task<(bool Success, string Message)> GuardarSolicitudAsync(IPage page)
     {
         // El botón/acción de guardar crea el ticket y luego redirige al listado.
         // Esperamos que exista y esté clickable.
@@ -812,6 +821,74 @@ public class AutomationService : IAutomationService
 
         // Espera corta a que el sistema procese/redirect.
         await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 60000 });
+
+        // Validar mensaje de resultado (SweetAlert)
+        var sweetAlert = page.Locator("div.sweet-alert.showSweetAlert, div.sweet-alert");
+        try
+        {
+            await sweetAlert.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
+        }
+        catch
+        {
+            Console.WriteLine("[BOT][WARN] No se detecto SweetAlert de confirmacion. Continuando.");
+            return (true, "Sin SweetAlert");
+        }
+
+        var title = string.Empty;
+        var text = string.Empty;
+        try
+        {
+            var titleLoc = sweetAlert.Locator("h2");
+            if (await titleLoc.CountAsync() > 0)
+                title = (await titleLoc.InnerTextAsync()).Trim();
+
+            var textLoc = sweetAlert.Locator("p");
+            if (await textLoc.CountAsync() > 0)
+                text = (await textLoc.First.InnerTextAsync()).Trim();
+        }
+        catch
+        {
+            // no-op
+        }
+
+        var normalizedTitle = NormalizarTextoStatic(title);
+        var normalizedText = NormalizarTextoStatic(text);
+
+        var isSuccess = normalizedTitle.Contains("CORRECTO") ||
+                        normalizedText.Contains("EXITOSAMENTE") ||
+                        normalizedText.Contains("EXITOSO") ||
+                        normalizedText.Contains("ACTUALIZADOS") ||
+                        normalizedText.Contains("ACTUALIZADO");
+
+        var isError = normalizedTitle.Contains("ERROR") ||
+                      normalizedTitle.Contains("ADVERTENCIA") ||
+                      normalizedText.Contains("NO SE PUDO") ||
+                      normalizedText.Contains("ERROR");
+
+        var confirmButton = sweetAlert.Locator("button.confirm");
+        if (await confirmButton.CountAsync() > 0)
+        {
+            await confirmButton.ClickAsync();
+        }
+
+        var message = string.IsNullOrWhiteSpace(title)
+            ? text
+            : (string.IsNullOrWhiteSpace(text) ? title : $"{title}: {text}");
+
+        if (isError && !isSuccess)
+        {
+            Console.WriteLine($"[BOT][ERROR] GuardarSolicitud: {message}");
+            return (false, message);
+        }
+
+        if (isSuccess)
+        {
+            Console.WriteLine($"[BOT] GuardarSolicitud OK: {message}");
+            return (true, message);
+        }
+
+        Console.WriteLine($"[BOT][WARN] GuardarSolicitud sin estado claro: {message}");
+        return (false, message);
     }
 
     private static async Task<string> ValidarEnListadoYObtenerTicketAsync(IPage page, string baseUrl, string nitBackend, string empresaBackend)

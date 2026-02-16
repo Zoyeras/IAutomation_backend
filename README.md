@@ -19,6 +19,7 @@ API REST en **ASP.NET Core (.NET 10)** que:
 
 - [Arquitectura](#arquitectura)
 - [Busqueda de duplicados](#busqueda-de-duplicados)
+- [Validacion de creacion de ticket](#validacion-de-creacion-de-ticket)
 - [Endpoints](#endpoints)
 - [Modelo de datos](#modelo-de-datos)
 - [Configuración](#configuración)
@@ -73,7 +74,18 @@ Detalles tecnicos:
 - Para validar factura se usa la URL del boton "Ver" de cada fila (se toma el `href` de la columna de acciones), no un URL armado por ticket.
 - Se valida el campo `#factura` en la vista del ticket.
 
-Referencia tecnica completa en [BUSQUEDA_DUPLICADOS_README.md](BUSQUEDA_DUPLICADOS_README.md).
+---
+
+## Validacion de creacion de ticket
+
+Despues de presionar `#guardar_solicitudGestor`, el bot valida el SweetAlert de resultado para confirmar si el ticket se creo correctamente.
+
+- Si es exito: continua flujo y deja el mensaje disponible para el frontend.
+- Si es error: detiene el flujo, guarda el mensaje y no continua a buscar ticket ni WhatsApp.
+
+Nota: la logica de WhatsApp no se cambio; solo se ejecuta si la creacion del ticket fue exitosa.
+
+El frontend puede hacer polling al endpoint `GET /api/registros/{id}` para mostrar el mensaje al usuario y decidir cuando limpiar el formulario.
 
 ---
 
@@ -164,6 +176,22 @@ Guarda el registro y dispara la automatización en segundo plano.
 
 ```json
 { "message": "Guardado y Automatización iniciada", "id": 38 }
+```
+
+### `GET /api/registros/{id}`
+
+Consulta el estado de automatizacion y el mensaje (exito o error) para polling desde el frontend.
+
+**Respuesta** (ejemplo):
+
+```json
+{
+  "id": 38,
+  "estado": "COMPLETADO",
+  "mensaje": "Correcto: Datos actualizados exitosamente",
+  "ticket": "16076",
+  "tipoCliente": "Antiguo"
+}
 ```
 
 ---

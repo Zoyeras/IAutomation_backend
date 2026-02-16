@@ -50,4 +50,22 @@ public class RegistrosController : ControllerBase
 
         return Ok(new { message = "Guardado y Automatización iniciada", id = registro.Id });
     }
+
+    [HttpGet("{id:int}")]
+    public async Task<ActionResult> GetById(int id)
+    {
+        await using var context = await _dbContextFactory.CreateDbContextAsync();
+        var entity = await context.Registros.AsNoTracking().FirstOrDefaultAsync(r => r.Id == id);
+        if (entity == null)
+            return NotFound(new { message = "Registro no encontrado" });
+
+        return Ok(new
+        {
+            id = entity.Id,
+            estado = entity.EstadoAutomatizacion,
+            mensaje = entity.UltimoErrorAutomatizacion,
+            ticket = entity.Ticket,
+            tipoCliente = entity.TipoCliente
+        });
+    }
 }
