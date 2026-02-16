@@ -77,14 +77,15 @@ public class AutomationService : IAutomationService
             await page.FillAsync("#password", password);
             await page.ClickAsync("#ingresar");
 
-            // Búsqueda de duplicados ANTES de cargar el formulario
+            // NUEVO: Búsqueda de duplicados ANTES de cargar el formulario
             Console.WriteLine("[BOT] Iniciando búsqueda de duplicados...");
             var tipoClienteDeterminado = await DeterminarTipoClienteAsync(page, baseUrl, registro);
             Console.WriteLine($"[BOT] Tipo Cliente determinado: {tipoClienteDeterminado}");
-
+            
             // Actualizar el registro con el TipoCliente determinado
             registro.TipoCliente = tipoClienteDeterminado;
 
+            // Navegar al formulario (después de búsqueda, para asegurar que esté limpio)
             Console.WriteLine("[BOT] Navegando al formulario...");
             await page.GotoAsync($"{baseUrl}/SolicitudGestor/create", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
 
@@ -201,298 +202,6 @@ public class AutomationService : IAutomationService
         }
     }
 
-    private async Task<string> DeterminarTipoClienteAsync(IPage page, string baseUrl, Registro registro)
-    {
-        try
-        {
-            var nit = registro.Nit?.Trim() ?? string.Empty;
-            var empresa = registro.Empresa?.Trim() ?? string.Empty;
-            var celular = registro.Celular?.Trim().Replace(" ", "").Replace("-", "") ?? string.Empty;
-
-            Console.WriteLine($"[BOT] Navegando a listado para búsqueda de duplicados: {baseUrl}/SolicitudGestor");
-            await page.GotoAsync($"{baseUrl}/SolicitudGestor", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
-
-            // Esperar a que la tabla renderice
-            await Task.Delay(10000);
-
-            var rowsLocator = page.Locator("table.responsive-table tbody tr");
-            var rowCount = await rowsLocator.CountAsync();
-            Console.WriteLine($"[BOT] Encontradas {rowCount} filas en tabla (pagina actual)");
-
-            if (!string.IsNullOrWhiteSpace(nit))
-            {
-                Console.WriteLine($"[BOT] Intento 1: Buscando por NIT '{nit}'...");
-                var rowsSnapshot = await ObtenerFilasFiltradasAsync(page, nit);
-                bool encontroFactura = await BuscarEnResultadosYValidarAsync(page, baseUrl, rowsSnapshot, "NIT", nit, empresa: null, celular: null);
-                if (encontroFactura)
-                {
-                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por NIT. Tipo Cliente = ANTIGUO");
-                    return "Antiguo";
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(empresa))
-            {
-                Console.WriteLine($"[BOT] Intento 2: Buscando por Empresa '{empresa}'...");
-                var rowsSnapshot = await ObtenerFilasFiltradasAsync(page, empresa);
-                bool encontroFactura = await BuscarEnResultadosYValidarAsync(page, baseUrl, rowsSnapshot, "EMPRESA", nit: null, empresa: empresa, celular: null);
-                if (encontroFactura)
-                {
-                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por Empresa. Tipo Cliente = ANTIGUO");
-                    return "Antiguo";
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(celular))
-            {
-                Console.WriteLine($"[BOT] Intento 3: Buscando por Celular '{celular}'...");
-                var rowsSnapshot = await ObtenerFilasFiltradasAsync(page, celular);
-                bool encontroFactura = await BuscarEnResultadosYValidarAsync(page, baseUrl, rowsSnapshot, "CELULAR", nit: null, empresa: null, celular: celular);
-                if (encontroFactura)
-                {
-                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por Celular. Tipo Cliente = ANTIGUO");
-                    return "Antiguo";
-                }
-            }
-
-            Console.WriteLine("[BOT] Sin factura válida encontrada. Tipo Cliente = NUEVO");
-            return "Nuevo";
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[BOT][ERROR] En DeterminarTipoClienteAsync: {ex.Message}");
-            return "Nuevo";
-        }
-    }
-
-    private async Task<bool> BuscarEnResultadosYValidarAsync(IPage page, string baseUrl, List<TicketRowData> rowsSnapshot, string tipoIntento, string? nit, string? empresa, string? celular)
-    {
-        try
-        {
-            IEnumerable<TicketRowData> coincidentes = rowsSnapshot;
-
-            if (tipoIntento == "NIT" && !string.IsNullOrWhiteSpace(nit))
-            {
-                coincidentes = coincidentes.Where(r => string.Equals(r.Nit, nit, StringComparison.OrdinalIgnoreCase));
-            }
-            else if (tipoIntento == "EMPRESA" && !string.IsNullOrWhiteSpace(empresa))
-            {
-                var empresaNormalizada = NormalizarTextoStatic(empresa);
-                coincidentes = coincidentes.Where(r =>
-                {
-                    var empresaRowNormalizada = NormalizarTextoStatic(r.Empresa);
-                    return empresaRowNormalizada == empresaNormalizada ||
-                           empresaRowNormalizada.Contains(empresaNormalizada) ||
-                           empresaNormalizada.Contains(empresaRowNormalizada);
-                });
-            }
-            else if (tipoIntento == "CELULAR" && !string.IsNullOrWhiteSpace(celular))
-            {
-                coincidentes = coincidentes.Where(r => string.Equals(r.Celular, celular, StringComparison.OrdinalIgnoreCase));
-            }
-            else
-            {
-                return false;
-            }
-
-            var coincidentesList = coincidentes.ToList();
-            Console.WriteLine($"[BOT] Coincidencias por {tipoIntento}: {coincidentesList.Count}");
-
-            foreach (var row in coincidentesList)
-            {
-                if (string.IsNullOrWhiteSpace(row.Ticket)) continue;
-                Console.WriteLine($"[BOT] Coincidencia encontrada en fila: {row.Ticket}. Verificando factura...");
-                bool tieneFactura = await ValidarFacturaEnTicketAsync(page, baseUrl, row.Ticket, row.VerUrl);
-                if (tieneFactura)
-                    return true;
-            }
-
-            return false;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[BOT][ERROR] En BuscarEnResultadosYValidarAsync: {ex.Message}");
-            return false;
-        }
-    }
-
-    private sealed class TicketRowData
-    {
-        public string Ticket { get; set; } = string.Empty;
-        public string Nit { get; set; } = string.Empty;
-        public string Empresa { get; set; } = string.Empty;
-        public string Celular { get; set; } = string.Empty;
-        public string VerUrl { get; set; } = string.Empty;
-    }
-
-    private async Task<List<TicketRowData>> ObtenerFilasFiltradasAsync(IPage page, string? query)
-    {
-        await AplicarFiltroListadoAsync(page, query);
-
-        var rowsSnapshot = new List<TicketRowData>();
-        var ticketsSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var pagesVisited = 0;
-
-        while (true)
-        {
-            await CapturarFilasPaginaAsync(page, rowsSnapshot, ticketsSeen);
-            pagesVisited++;
-
-            if (pagesVisited >= 2)
-                break;
-
-            var avanzó = await IrPaginaSiguienteAsync(page);
-            if (!avanzó)
-                break;
-
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 60000 });
-            await Task.Delay(1000);
-
-        }
-
-        return rowsSnapshot;
-    }
-
-    private static async Task AplicarFiltroListadoAsync(IPage page, string? query)
-    {
-        var searchInput = page.Locator("input#nombre[name='buscar']");
-
-        try
-        {
-            await searchInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
-
-            await searchInput.FillAsync(string.Empty);
-            if (!string.IsNullOrWhiteSpace(query))
-            {
-                await searchInput.FillAsync(query);
-            }
-
-            await searchInput.PressAsync("Enter");
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 60000 });
-            await Task.Delay(1000);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[BOT] Falló aplicar filtro en listado (input#nombre). Error={ex.Message}");
-        }
-    }
-
-    private static async Task CapturarFilasPaginaAsync(IPage page, List<TicketRowData> rowsSnapshot, HashSet<string> ticketsSeen)
-    {
-        var rowsLocator = page.Locator("table.responsive-table tbody tr");
-        var rowCount = await rowsLocator.CountAsync();
-
-        for (int i = 0; i < rowCount; i++)
-        {
-            var row = rowsLocator.Nth(i);
-            var cells = row.Locator("td");
-            var cellCount = await cells.CountAsync();
-            if (cellCount < 7) continue;
-
-            var ticket = (await cells.Nth(0).InnerTextAsync()).Trim();
-            if (string.IsNullOrWhiteSpace(ticket)) continue;
-
-            if (!ticketsSeen.Add(ticket))
-                continue;
-
-            var verUrl = string.Empty;
-            try
-            {
-                var actionCell = cells.Nth(cellCount - 1);
-                var verLink = actionCell.Locator("a[data-original-title='Ver'], a[title='Ver'], a[href*='/SolicitudGestor/']").First;
-                if (await verLink.CountAsync() > 0)
-                {
-                    verUrl = (await verLink.GetAttributeAsync("href") ?? string.Empty).Trim();
-                }
-            }
-            catch
-            {
-                // no-op
-            }
-
-            rowsSnapshot.Add(new TicketRowData
-            {
-                Ticket = ticket,
-                Nit = (await cells.Nth(3).InnerTextAsync()).Trim(),
-                Empresa = (await cells.Nth(4).InnerTextAsync()).Trim(),
-                Celular = (await cells.Nth(6).InnerTextAsync()).Trim().Replace(" ", "").Replace("-", ""),
-                VerUrl = verUrl
-            });
-        }
-    }
-
-    private static async Task<bool> IrPaginaSiguienteAsync(IPage page)
-    {
-        var pagination = page.Locator("ul.pagination");
-        if (await pagination.CountAsync() == 0)
-            return false;
-
-        var links = await pagination.Locator("li a").ElementHandlesAsync();
-        foreach (var link in links)
-        {
-            var text = (await link.InnerTextAsync()).Trim();
-            if (text == ">" || text == "›" || text.Equals("Siguiente", StringComparison.OrdinalIgnoreCase) || text.Equals("Next", StringComparison.OrdinalIgnoreCase))
-            {
-                var isDisabled = await link.EvaluateAsync<bool>("el => el.closest('li')?.classList.contains('disabled') ?? false");
-                if (isDisabled)
-                    return false;
-
-                try
-                {
-                    await link.ClickAsync();
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private async Task<bool> ValidarFacturaEnTicketAsync(IPage page, string baseUrl, string ticket, string? verUrl)
-    {
-        try
-        {
-            var targetUrl = !string.IsNullOrWhiteSpace(verUrl)
-                ? verUrl!
-                : $"{baseUrl}/SolicitudGestor/{ticket}";
-
-            Console.WriteLine($"[BOT] Abriendo vista del ticket {ticket}... URL={targetUrl}");
-            await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
-
-            // Esperar a que cargue el contenido
-            await Task.Delay(10000);
-
-            var facturaLocator = page.Locator("#factura");
-            var facturaExists = await facturaLocator.CountAsync();
-
-            if (facturaExists == 0)
-            {
-                Console.WriteLine($"[BOT] Campo #factura no encontrado en ticket {ticket}");
-                return false;
-            }
-
-            var facturaValue = (await facturaLocator.InputValueAsync()).Trim();
-
-            if (string.IsNullOrWhiteSpace(facturaValue) || facturaValue == "0" || facturaValue == "0000")
-            {
-                Console.WriteLine($"[BOT] Factura vacía o inválida en ticket {ticket}: '{facturaValue}'");
-                return false;
-            }
-
-            Console.WriteLine($"[BOT] Factura válida encontrada en ticket {ticket}: '{facturaValue}'");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[BOT][ERROR] En ValidarFacturaEnTicketAsync para ticket {ticket}: {ex.Message}");
-            return false;
-        }
-    }
-
     private static async Task SeleccionarCiudadAsync(IPage page, string? ciudad)
     {
         if (string.IsNullOrWhiteSpace(ciudad))
@@ -569,7 +278,6 @@ public class AutomationService : IAutomationService
         await page.WaitForSelectorAsync("#tipo_cliente", new PageWaitForSelectorOptions { State = WaitForSelectorState.Visible, Timeout = 60000 });
         await page.SelectOptionAsync("#tipo_cliente", tipoValue);
     }
-            public string VerUrl { get; set; } = string.Empty;
 
     private static async Task SeleccionarMedioContactoAsync(IPage page, string? medioContacto)
     {
@@ -674,6 +382,7 @@ public class AutomationService : IAutomationService
         };
 
         await page.WaitForSelectorAsync("#asignado_a", new PageWaitForSelectorOptions { State = WaitForSelectorState.Visible, Timeout = 60000 });
+
         var asignadoNorm = NormalizarTextoStatic(asignado);
         if (!map.TryGetValue(asignadoNorm, out var value))
         {
@@ -1629,6 +1338,296 @@ public class AutomationService : IAutomationService
         catch (Exception ex)
         {
             Console.WriteLine($"[BOT] Error actualizando estado de automatización. Id={registroId}. Error={ex.Message}");
+        }
+    }
+
+    private async Task<string> DeterminarTipoClienteAsync(IPage page, string baseUrl, Registro registro)
+    {
+        try
+        {
+            var nit = registro.Nit?.Trim() ?? string.Empty;
+            var empresa = registro.Empresa?.Trim() ?? string.Empty;
+            var celular = registro.Celular?.Trim().Replace(" ", "").Replace("-", "") ?? string.Empty;
+
+            // Navegar UNA SOLA VEZ al listado
+            Console.WriteLine($"[BOT] Navegando a listado para búsqueda de duplicados: {baseUrl}/SolicitudGestor");
+            await page.GotoAsync($"{baseUrl}/SolicitudGestor", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+
+            // Esperar a que la tabla renderice
+            await Task.Delay(10000);
+
+            var rowsLocator = page.Locator("table.responsive-table tbody tr");
+            var rowCount = await rowsLocator.CountAsync();
+            Console.WriteLine($"[BOT] Encontradas {rowCount} filas en tabla");
+
+            // INTENTO 1: Buscar por NIT
+            if (!string.IsNullOrWhiteSpace(nit))
+            {
+                Console.WriteLine($"[BOT] Intento 1: Buscando por NIT '{nit}'...");
+                bool encontroFactura = await BuscarEnFilasYValidarAsync(page, baseUrl, rowsLocator, nit, null, null, "NIT");
+                if (encontroFactura)
+                {
+                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por NIT. Tipo Cliente = ANTIGUO");
+                    return "Antiguo";
+                }
+            }
+
+            // INTENTO 2: Buscar por Nombre de Empresa
+            if (!string.IsNullOrWhiteSpace(empresa))
+            {
+                Console.WriteLine($"[BOT] Intento 2: Buscando por Empresa '{empresa}'...");
+                bool encontroFactura = await BuscarEnFilasYValidarAsync(page, baseUrl, rowsLocator, null, empresa, null, "EMPRESA");
+                if (encontroFactura)
+                {
+                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por Empresa. Tipo Cliente = ANTIGUO");
+                    return "Antiguo";
+                }
+            }
+
+            // INTENTO 3: Buscar por Celular
+            if (!string.IsNullOrWhiteSpace(celular))
+            {
+                Console.WriteLine($"[BOT] Intento 3: Buscando por Celular '{celular}'...");
+                bool encontroFactura = await BuscarEnFilasYValidarAsync(page, baseUrl, rowsLocator, null, null, celular, "CELULAR");
+                if (encontroFactura)
+                {
+                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por Celular. Tipo Cliente = ANTIGUO");
+                    return "Antiguo";
+                }
+            }
+
+            // Si no encontró duplicado en ninguno de los 3 intentos
+            Console.WriteLine("[BOT] Sin factura válida encontrada. Tipo Cliente = NUEVO");
+            return "Nuevo";
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En DeterminarTipoClienteAsync: {ex.Message}");
+            // Por seguridad, si hay error, consideramos como NUEVO
+            return "Nuevo";
+        }
+    }
+
+    private async Task<bool> BuscarEnFilasYValidarAsync(IPage page, string baseUrl, ILocator rowsLocator, string? nit, string? empresa, string? celular, string tipoIntento)
+    {
+        try
+        {
+            var rowCount = await rowsLocator.CountAsync();
+
+            for (int i = 0; i < rowCount; i++)
+            {
+                var row = rowsLocator.Nth(i);
+                var cells = row.Locator("td");
+                var cellCount = await cells.CountAsync();
+
+                if (cellCount < 7) continue;
+
+                var ticketRow = (await cells.Nth(0).InnerTextAsync()).Trim();
+
+                bool coincide = false;
+
+                // Buscar según tipo
+                if (tipoIntento == "NIT" && !string.IsNullOrWhiteSpace(nit))
+                {
+                    var nitRow = (await cells.Nth(3).InnerTextAsync()).Trim();
+                    coincide = string.Equals(nitRow, nit, StringComparison.OrdinalIgnoreCase);
+                }
+                else if (tipoIntento == "EMPRESA" && !string.IsNullOrWhiteSpace(empresa))
+                {
+                    var empresaRow = (await cells.Nth(4).InnerTextAsync()).Trim();
+                    var empresaNormalizada = NormalizarTextoStatic(empresa);
+                    var empresaRowNormalizada = NormalizarTextoStatic(empresaRow);
+                    coincide = empresaRowNormalizada == empresaNormalizada ||
+                              empresaRowNormalizada.Contains(empresaNormalizada) ||
+                              empresaNormalizada.Contains(empresaRowNormalizada);
+                }
+                else if (tipoIntento == "CELULAR" && !string.IsNullOrWhiteSpace(celular))
+                {
+                    var celularRow = (await cells.Nth(6).InnerTextAsync()).Trim().Replace(" ", "").Replace("-", "");
+                    coincide = string.Equals(celularRow, celular, StringComparison.OrdinalIgnoreCase);
+                }
+
+                if (coincide)
+                {
+                    Console.WriteLine($"[BOT] Coincidencia encontrada en fila: {ticketRow}. Verificando factura...");
+                    bool tieneFactura = await ValidarFacturaEnTicketAsync(page, baseUrl, ticketRow);
+                    if (tieneFactura)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En BuscarEnFilasYValidarAsync: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<bool> BuscarPorNitYValidarAsync(IPage page, string baseUrl, string nit)
+    {
+        // Mantener esta función para compatibilidad, pero ya no se usa
+        return false;
+            var rowCount = await rowsLocator.CountAsync();
+            Console.WriteLine($"[BOT] Encontradas {rowCount} filas en tabla");
+
+            for (int i = 0; i < rowCount; i++)
+            {
+                var row = rowsLocator.Nth(i);
+                var cells = row.Locator("td");
+                var cellCount = await cells.CountAsync();
+
+                if (cellCount < 7) continue; // Necesitamos al menos hasta índice 6
+
+                var nitRow = (await cells.Nth(3).InnerTextAsync()).Trim();
+                var ticketRow = (await cells.Nth(0).InnerTextAsync()).Trim();
+
+                if (string.Equals(nitRow, nit, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[BOT] NIT coincide en fila: {ticketRow}. Verificando factura...");
+                    bool tieneFactura = await ValidarFacturaEnTicketAsync(page, baseUrl, ticketRow);
+                    if (tieneFactura)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En BuscarPorNitYValidarAsync: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<bool> BuscarPorEmpresaYValidarAsync(IPage page, string baseUrl, string empresa)
+    {
+        try
+        {
+            Console.WriteLine($"[BOT] Navegando a listado: {baseUrl}/SolicitudGestor");
+            await page.GotoAsync($"{baseUrl}/SolicitudGestor", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+
+            // Esperar a que la tabla renderice
+            await Task.Delay(10000);
+
+            var rowsLocator = page.Locator("table.responsive-table tbody tr");
+            var rowCount = await rowsLocator.CountAsync();
+            Console.WriteLine($"[BOT] Encontradas {rowCount} filas en tabla");
+
+            var empresaNormalizada = NormalizarTextoStatic(empresa);
+
+            for (int i = 0; i < rowCount; i++)
+            {
+                var row = rowsLocator.Nth(i);
+                var cells = row.Locator("td");
+                var cellCount = await cells.CountAsync();
+
+                if (cellCount < 7) continue;
+
+                var empresaRow = (await cells.Nth(4).InnerTextAsync()).Trim();
+                var ticketRow = (await cells.Nth(0).InnerTextAsync()).Trim();
+                var empresaRowNormalizada = NormalizarTextoStatic(empresaRow);
+
+                // Búsqueda tolerante (exacta o parcial)
+                if (empresaRowNormalizada == empresaNormalizada ||
+                    empresaRowNormalizada.Contains(empresaNormalizada) ||
+                    empresaNormalizada.Contains(empresaRowNormalizada))
+                {
+                    Console.WriteLine($"[BOT] Empresa coincide en fila: {ticketRow}. Verificando factura...");
+                    bool tieneFactura = await ValidarFacturaEnTicketAsync(page, baseUrl, ticketRow);
+                    if (tieneFactura)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En BuscarPorEmpresaYValidarAsync: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<bool> BuscarPorCelularYValidarAsync(IPage page, string baseUrl, string celular)
+    {
+        try
+        {
+            Console.WriteLine($"[BOT] Navegando a listado: {baseUrl}/SolicitudGestor");
+            await page.GotoAsync($"{baseUrl}/SolicitudGestor", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+
+            // Esperar a que la tabla renderice
+            await Task.Delay(10000);
+
+            var rowsLocator = page.Locator("table.responsive-table tbody tr");
+            var rowCount = await rowsLocator.CountAsync();
+            Console.WriteLine($"[BOT] Encontradas {rowCount} filas en tabla");
+
+            for (int i = 0; i < rowCount; i++)
+            {
+                var row = rowsLocator.Nth(i);
+                var cells = row.Locator("td");
+                var cellCount = await cells.CountAsync();
+
+                if (cellCount < 7) continue; // Necesitamos hasta índice 6
+
+                var celularRow = (await cells.Nth(6).InnerTextAsync()).Trim().Replace(" ", "").Replace("-", "");
+                var ticketRow = (await cells.Nth(0).InnerTextAsync()).Trim();
+
+                if (string.Equals(celularRow, celular, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[BOT] Celular coincide en fila: {ticketRow}. Verificando factura...");
+                    bool tieneFactura = await ValidarFacturaEnTicketAsync(page, baseUrl, ticketRow);
+                    if (tieneFactura)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En BuscarPorCelularYValidarAsync: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<bool> ValidarFacturaEnTicketAsync(IPage page, string baseUrl, string ticket)
+    {
+        try
+        {
+            Console.WriteLine($"[BOT] Abriendo vista del ticket {ticket}...");
+            await page.GotoAsync($"{baseUrl}/SolicitudGestor/{ticket}", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+
+            // Esperar a que cargue el contenido
+            await Task.Delay(10000);
+
+            // Buscar campo #factura
+            var facturaLocator = page.Locator("#factura");
+            var facturaExists = await facturaLocator.CountAsync();
+
+            if (facturaExists == 0)
+            {
+                Console.WriteLine($"[BOT] Campo #factura no encontrado en ticket {ticket}");
+                return false;
+            }
+
+            var facturaValue = (await facturaLocator.InputValueAsync()).Trim();
+
+            if (string.IsNullOrWhiteSpace(facturaValue) || facturaValue == "0" || facturaValue == "0000")
+            {
+                Console.WriteLine($"[BOT] Factura vacía o inválida en ticket {ticket}: '{facturaValue}'");
+                return false;
+            }
+
+            Console.WriteLine($"[BOT] Factura válida encontrada en ticket {ticket}: '{facturaValue}'");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En ValidarFacturaEnTicketAsync para ticket {ticket}: {ex.Message}");
+            return false;
         }
     }
 }

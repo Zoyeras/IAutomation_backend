@@ -18,6 +18,7 @@ API REST en **ASP.NET Core (.NET 10)** que:
 ## Tabla de contenidos
 
 - [Arquitectura](#arquitectura)
+- [Busqueda de duplicados](#busqueda-de-duplicados)
 - [Endpoints](#endpoints)
 - [Modelo de datos](#modelo-de-datos)
 - [Configuración](#configuración)
@@ -53,6 +54,29 @@ Componentes principales:
 
 ---
 
+## Busqueda de duplicados
+
+Antes de crear el ticket, el bot determina `TipoCliente` con una busqueda automatica en el listado de solicitudes:
+
+1. Por NIT (exacta)
+2. Por Empresa (tolerante)
+3. Por Celular (exacta)
+
+Regla:
+
+- Si encuentra una factura valida en cualquier coincidencia, marca `TipoCliente = "Antiguo"` y detiene la busqueda.
+- Si no encuentra factura valida, marca `TipoCliente = "Nuevo"`.
+
+Detalles tecnicos:
+
+- Se usa el filtro del listado (`input#nombre[name='buscar']`) y se revisa hasta 2 paginas (pagina actual + una siguiente).
+- Para validar factura se usa la URL del boton "Ver" de cada fila (se toma el `href` de la columna de acciones), no un URL armado por ticket.
+- Se valida el campo `#factura` en la vista del ticket.
+
+Referencia tecnica completa en [BUSQUEDA_DUPLICADOS_README.md](BUSQUEDA_DUPLICADOS_README.md).
+
+---
+
 ## Changelog corto (cambios recientes)
 
 ### Arreglo: error de DI (DbContextOptions scoped vs singleton)
@@ -61,12 +85,12 @@ Si al ejecutar `dotnet run` aparecía un error similar a:
 
 - `Cannot consume scoped service 'DbContextOptions<AppDbContext>' from singleton ... (DbContextPool/DbContextFactory)`
 
-El arreglo aplicado fue **evitar mezclar** `AddDbContext(...)` con `AddDbContextFactory/AddPooledDbContextFactory` en una forma que termine registrando `DbContextOptions<T>` como *scoped* para un servicio *singleton*.
+El arreglo aplicado fue **evitar mezclar** `AddDbContext(...)` con `AddDbContextFactory/AddPooledDbContextFactory` en una forma que termine registrando `DbContextOptions<T>` como _scoped_ para un servicio _singleton_.
 
 **Configuración recomendada (actual):**
 
 - Usar `AddPooledDbContextFactory<AppDbContext>(...)` (seguro para tareas en background / singleton).
-- Registrar `AppDbContext` como *scoped* para controllers, creado desde la factory.
+- Registrar `AppDbContext` como _scoped_ para controllers, creado desde la factory.
 
 Esto queda en `Program.cs` (resumen):
 
@@ -211,7 +235,7 @@ Requisitos del sistema:
 
 ## Instalación y ejecución
 
-1) Restaurar y compilar
+1. Restaurar y compilar
 
 ```bash
 cd Backend/AutomationAPI
@@ -219,7 +243,7 @@ dotnet restore
 dotnet build
 ```
 
-2) Configurar `appsettings.json` (o usar `appsettings.Development.json`)
+2. Configurar `appsettings.json` (o usar `appsettings.Development.json`)
 
 Sugerencia: copiar desde el ejemplo:
 
@@ -227,7 +251,7 @@ Sugerencia: copiar desde el ejemplo:
 cp appsettings.Example.json appsettings.Development.json
 ```
 
-3) Ejecutar
+3. Ejecutar
 
 ```bash
 dotnet run
@@ -265,14 +289,14 @@ dotnet tool install --global dotnet-ef
 
 ### Linux (recomendado)
 
-1) Compila para que se generen los scripts de Playwright:
+1. Compila para que se generen los scripts de Playwright:
 
 ```bash
 cd Backend/AutomationAPI
 dotnet build
 ```
 
-2) Instala dependencias del sistema (recomendado en Linux) y luego los browsers:
+2. Instala dependencias del sistema (recomendado en Linux) y luego los browsers:
 
 ```bash
 ./bin/Debug/net10.0/playwright.sh install-deps
@@ -316,13 +340,16 @@ pwsh ./bin/Debug/net10.0/playwright.ps1 install
 **Versión 2.1 (11 de febrero 2026):** Implementación de **doble envío a WhatsApp**
 
 #### Antes (v2.0)
+
 - Enviaba un solo mensaje al **celular del cliente** (número de teléfono)
 
 #### Ahora (v2.1)
+
 - **Primer envío:** Grupo "Tickets Soluciones" → Información del ticket para el equipo
 - **Segundo envío:** Celular del cliente → Mensaje personalizado con saludo cortés
 
 **Ejemplo de mensajes:**
+
 ```
 [GRUPO] Buen día, asignación de
 TICKET N° 123456
@@ -333,9 +360,9 @@ TELÉFONO DE CONTACTO: 3105003030
 CIUDAD: Bogota
 OBSERVACIÓN: Descripción de la solicitud
 
-[CLIENTE] Muchas gracias por la información Sr Juan Pérez, 
-la solicitud acaba de ser compartida con un asesor el cual 
-le contactara pronto, tenga excelente dia, cualquier duda 
+[CLIENTE] Muchas gracias por la información Sr Juan Pérez,
+la solicitud acaba de ser compartida con un asesor el cual
+le contactara pronto, tenga excelente dia, cualquier duda
 estoy atento
 ```
 
@@ -344,6 +371,7 @@ estoy atento
 ### Errores encontrados y soluciones
 
 #### ❌ Error 1: Click en resultados de búsqueda no funcionaba
+
 **Problema:** El bot escribía el nombre del grupo en la barra de búsqueda, pero el click no abría el chat.  
 **Solución:** Usar navegación por teclado (`ArrowDown` + `Enter`) en lugar de clicks en el DOM.
 
@@ -359,6 +387,7 @@ await searchBox.PressAsync("Enter");
 **Por qué funciona:** La navegación por teclado es más confiable contra cambios en la UI de WhatsApp Web.
 
 #### ❌ Error 2: Escribía en barra de búsqueda (no en el chat)
+
 **Problema:** El selector `[contenteditable='true']` coincidía con múltiples elementos (barra de búsqueda e input del chat).  
 **Solución:** Usar `.Last` en lugar de `.First` para seleccionar el compositor del chat abierto.
 
@@ -373,6 +402,7 @@ composer = locator.Last;
 **Mejora adicional:** Esperar 3 segundos después de abrir el chat para que WhatsApp Web renderice completamente.
 
 #### ❌ Error 3: Conflicto de compilación (top-level statements)
+
 **Problema:** Error `CS8802: Only one compilation unit can have top-level statements`.  
 **Causa:** Crear múltiples archivos `.cs` con top-level statements en el mismo proyecto.  
 **Solución:** Eliminar archivo conflictivo y consolidar tests en `Program.cs` con argumentos de línea de comandos.
@@ -382,19 +412,25 @@ composer = locator.Last;
 ### Nuevos métodos implementados
 
 #### 1. `EnviarWhatsAppWebAGrupoAsync()`
+
 Envía un mensaje a un grupo de WhatsApp.
+
 ```csharp
 await EnviarWhatsAppWebAGrupoAsync("Tickets Soluciones", mensajeGrupo);
 ```
 
 #### 2. `EnviarWhatsAppWebAContactoAsync()`
+
 Envía un mensaje personalizado al celular de un cliente.
+
 ```csharp
 await EnviarWhatsAppWebAContactoAsync(celular, nombreCliente, mensajePersonalizado);
 ```
 
 #### 3. `ConstruirMensajePersonalizadoCliente()`
+
 Construye el mensaje personalizado con saludo automático (Sr./Sra.).
+
 ```csharp
 var msg = ConstruirMensajePersonalizadoCliente("Juan Pérez");
 // Retorna: "Muchas gracias por la información Sr Juan Pérez..."
@@ -408,7 +444,7 @@ var msg = ConstruirMensajePersonalizadoCliente("Juan Pérez");
 ✅ **Detección automática de Sr./Sra.** - Basada en análisis del primer nombre  
 ✅ **Persistencia mejorada de sesión** - Se guarda después de cada envío en `whatsapp.storage.json`  
 ✅ **Logs descriptivos** - Cada paso imprime información clara en consola  
-✅ **Manejo independiente de errores** - Un envío fallido no bloquea al otro  
+✅ **Manejo independiente de errores** - Un envío fallido no bloquea al otro
 
 ---
 
@@ -426,6 +462,7 @@ dotnet run
 ```
 
 **Salida esperada del test dos mensajes:**
+
 ```
 📤 ENVIANDO MENSAJE 1 AL GRUPO 'Tickets Soluciones'
    ✓ Mensaje escrito y enviado al grupo
@@ -555,6 +592,7 @@ $ dotnet run
 ```
 
 Cuando se crea un registro via `POST /api/registros`, automáticamente:
+
 1. Se guarda en PostgreSQL
 2. Se abre el navegador y rellena el formulario del SIC
 3. Se obtiene el ticket
@@ -678,7 +716,7 @@ Reglas aplicadas:
 - 2 palabras → nombre + 1 apellido
 - 3 palabras → 1 nombre + 2 apellidos
 - 4 palabras → 2 nombres + 2 apellidos
-- >4 → fallback: primeras 2 como nombre, resto como apellidos
+- > 4 → fallback: primeras 2 como nombre, resto como apellidos
 
 Si `#apellido_contacto` no existe en el SIC, el bot **no rompe** el flujo (try/catch).
 

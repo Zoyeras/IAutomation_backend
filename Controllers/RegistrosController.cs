@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using AutomationAPI.Data;
 using AutomationAPI.Models;
-using AutomationAPI.Services; // <-- IMPORTANTE: Este puente es necesario
+using AutomationAPI.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace AutomationAPI.Controllers;
