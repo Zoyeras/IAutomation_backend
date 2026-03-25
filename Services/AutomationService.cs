@@ -396,13 +396,21 @@ public class AutomationService : IAutomationService
             var row = rowsLocator.Nth(i);
             var cells = row.Locator("td");
             var cellCount = await cells.CountAsync();
-            if (cellCount < 7) continue;
+            // Mínimo de columnas esperadas: 12 (incluyendo la celda oculta de control)
+            if (cellCount < 12) continue;
 
-            var ticket = (await cells.Nth(0).InnerTextAsync()).Trim();
+            // La primera celda es la de control (colapsable) → ticket en índice 1
+            var ticket = (await cells.Nth(1).InnerTextAsync()).Trim();
             if (string.IsNullOrWhiteSpace(ticket)) continue;
 
             if (!ticketsSeen.Add(ticket))
                 continue;
+
+            // Índices reales según el HTML:
+            // Nit = 4, Empresa = 5, Celular = 7
+            var nit = (await cells.Nth(4).InnerTextAsync()).Trim();
+            var empresa = (await cells.Nth(5).InnerTextAsync()).Trim();
+            var celular = (await cells.Nth(7).InnerTextAsync()).Trim().Replace(" ", "").Replace("-", "");
 
             var verUrl = string.Empty;
             try
@@ -422,9 +430,9 @@ public class AutomationService : IAutomationService
             rowsSnapshot.Add(new TicketRowData
             {
                 Ticket = ticket,
-                Nit = (await cells.Nth(3).InnerTextAsync()).Trim(),
-                Empresa = (await cells.Nth(4).InnerTextAsync()).Trim(),
-                Celular = (await cells.Nth(6).InnerTextAsync()).Trim().Replace(" ", "").Replace("-", ""),
+                Nit = nit,
+                Empresa = empresa,
+                Celular = celular,
                 VerUrl = verUrl
             });
         }
@@ -578,7 +586,6 @@ public class AutomationService : IAutomationService
         await page.WaitForSelectorAsync("#tipo_cliente", new PageWaitForSelectorOptions { State = WaitForSelectorState.Visible, Timeout = 60000 });
         await page.SelectOptionAsync("#tipo_cliente", tipoValue);
     }
-            public string VerUrl { get; set; } = string.Empty;
 
     private static async Task SeleccionarMedioContactoAsync(IPage page, string? medioContacto)
     {
@@ -939,11 +946,12 @@ public class AutomationService : IAutomationService
                 var row = rowsLocator.Nth(i);
                 var cells = row.Locator("td");
                 var cellCount = await cells.CountAsync();
-                if (cellCount < 5) continue;
+                if (cellCount < 12) continue;
 
-                var ticket = T(await cells.Nth(0).InnerTextAsync());
-                var nitRow = T(await cells.Nth(3).InnerTextAsync());
-                var empresaRow = T(await cells.Nth(4).InnerTextAsync());
+                // Índices: Ticket = 1, Nit = 4, Empresa = 5
+                var ticket = T(await cells.Nth(1).InnerTextAsync());
+                var nitRow = T(await cells.Nth(4).InnerTextAsync());
+                var empresaRow = T(await cells.Nth(5).InnerTextAsync());
 
                 // Match 1: NIT exacto
                 if (!string.IsNullOrWhiteSpace(nit) && string.Equals(nitRow, nit, StringComparison.OrdinalIgnoreCase))
@@ -1012,7 +1020,7 @@ public class AutomationService : IAutomationService
         count = await rowsLocator.CountAsync();
         if (count > 0)
         {
-            var first = rowsLocator.Nth(0).Locator("td").Nth(0);
+            var first = rowsLocator.Nth(0).Locator("td").Nth(1);   // ← índice 1
             var ticketFallback = T(await first.InnerTextAsync());
 
             Console.WriteLine($"[BOT][WARN] No hubo coincidencia exacta en listado. NIT='{nit}', Empresa='{empresa}'. " +
@@ -1137,6 +1145,7 @@ public class AutomationService : IAutomationService
 
         var page = context.Pages.Count > 0 ? context.Pages[0] : await context.NewPageAsync();
 
+        // Navegar a WhatsApp Web con DOMContentLoaded (evita bloqueos por NetworkIdle)
         await page.GotoAsync(waBaseUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
         try { await page.BringToFrontAsync(); } catch { /* no-op */ }
 
@@ -1196,23 +1205,24 @@ public class AutomationService : IAutomationService
         var waWebSendUrl = $"https://web.whatsapp.com/send?phone={to}&text={encoded}";
 
         Console.WriteLine($"[WA] Abriendo chat (web): {waWebSendUrl}");
-        await page.GotoAsync(waWebSendUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 60000 });
+        // CAMBIO: NetworkIdle -> DOMContentLoaded
+        await page.GotoAsync(waWebSendUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
         
         // Esperamos extra para que WhatsApp cargue completamente (puede haber redirecciones)
         Console.WriteLine("[WA] Esperando 5 segundos para que WhatsApp cargue completamente (puede recargar)...");
         await Task.Delay(5000);
 
         // Ya en WhatsApp Web, esperamos el composer (input de mensaje)
-        // Intentamos múltiples selectores en orden de preferencia
+        // Selectores actualizados según nueva interfaz
         var composerSelectors = new[]
         {
-            "[contenteditable='true']",                        // Más genérico, funciona mejor
-            "div[contenteditable='true']",                     // Div editable
-            "div[contenteditable='true'][data-tab]",           // Con data-tab
-            "div[contenteditable='true'][role='textbox']",     // Con role
-            "[role='textbox']",                                // Solo role
-            "input[type='text'][placeholder*='message' i]",    // Input de texto
-            ".selectable-text.copyable-text"                   // Clases de WhatsApp
+            "div[contenteditable='true'][role='textbox'][aria-label='Mensaje']",
+            "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true']:last-of-type",
+            "[contenteditable='true']",
+            "div[contenteditable='true'][data-tab]",
+            "div[aria-label='Mensaje']",
+            "div[aria-label='Message']"
         };
 
         ILocator? composer = null;
@@ -1428,22 +1438,25 @@ public class AutomationService : IAutomationService
         if (string.IsNullOrWhiteSpace(name))
             throw new InvalidOperationException("WhatsAppConfig:GroupName vacío");
 
-        // Buscar chat por nombre
-        var searchBoxCandidates = new[]
+        // Selectores actualizados para la barra de búsqueda
+        var searchBoxSelectors = new[]
         {
-            "div[contenteditable='true'][data-tab='3']",
-            "div[contenteditable='true'][data-tab='4']",
-            "div[contenteditable='true'][data-tab='5']",
-            "div[contenteditable='true'][role='textbox']"
+            "input[role='textbox'][data-tab='3']",
+            "input[aria-label*='Buscar']",
+            "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true'][data-tab]",
+            "div[aria-label='Buscar']",
+            "div[aria-label='Search']"
         };
 
         ILocator? searchBox = null;
-        foreach (var sel in searchBoxCandidates)
+        foreach (var sel in searchBoxSelectors)
         {
             var loc = page.Locator(sel).First;
             if (await loc.CountAsync() > 0)
             {
                 searchBox = loc;
+                Console.WriteLine($"[WA] Buscador encontrado con selector: {sel}");
                 break;
             }
         }
@@ -1484,8 +1497,9 @@ public class AutomationService : IAutomationService
         // Composer y envío por renglones
         var composerSelectors = new[]
         {
-            "div[contenteditable='true'][data-tab]",
+            "div[contenteditable='true'][role='textbox'][aria-label='Mensaje']",
             "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true'][data-tab]",
             "[contenteditable='true']"
         };
 
@@ -1496,6 +1510,7 @@ public class AutomationService : IAutomationService
             if (await loc.CountAsync() > 0)
             {
                 composer = loc.Last;
+                Console.WriteLine($"[WA] Compositor encontrado con selector: {selector}");
                 break;
             }
         }
@@ -1529,22 +1544,25 @@ public class AutomationService : IAutomationService
         if (string.IsNullOrWhiteSpace(celularNormalizado))
             throw new InvalidOperationException("Celular del cliente vacío");
 
-        // Buscar chat por celular usando la barra de búsqueda
-        var searchBoxCandidates = new[]
+        // Selectores actualizados para la barra de búsqueda
+        var searchBoxSelectors = new[]
         {
-            "div[contenteditable='true'][data-tab='3']",
-            "div[contenteditable='true'][data-tab='4']",
-            "div[contenteditable='true'][data-tab='5']",
-            "div[contenteditable='true'][role='textbox']"
+            "input[role='textbox'][data-tab='3']",
+            "input[aria-label*='Buscar']",
+            "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true'][data-tab]",
+            "div[aria-label='Buscar']",
+            "div[aria-label='Search']"
         };
 
         ILocator? searchBox = null;
-        foreach (var sel in searchBoxCandidates)
+        foreach (var sel in searchBoxSelectors)
         {
             var loc = page.Locator(sel).First;
             if (await loc.CountAsync() > 0)
             {
                 searchBox = loc;
+                Console.WriteLine($"[WA] Buscador encontrado con selector: {sel}");
                 break;
             }
         }
@@ -1583,8 +1601,9 @@ public class AutomationService : IAutomationService
         // Encontrar el compositor y escribir mensaje por líneas
         var composerSelectors = new[]
         {
-            "div[contenteditable='true'][data-tab]",
+            "div[contenteditable='true'][role='textbox'][aria-label='Mensaje']",
             "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true'][data-tab]",
             "[contenteditable='true']"
         };
 
@@ -1595,6 +1614,7 @@ public class AutomationService : IAutomationService
             if (await loc.CountAsync() > 0)
             {
                 composer = loc.Last;
+                Console.WriteLine($"[WA] Compositor encontrado con selector: {selector}");
                 break;
             }
         }
@@ -1624,30 +1644,62 @@ public class AutomationService : IAutomationService
 
     private static async Task AsegurarLoginWhatsAppAsync(IPage page, IBrowserContext context, string storageStatePath, TimeSpan timeout)
     {
-        var searchBox = page.Locator("div[contenteditable='true'][data-tab='3']");
-
-        try
+        // Selectores actualizados para el cuadro de búsqueda de WhatsApp Web
+        var searchBoxSelectors = new[]
         {
-            await searchBox.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 8000 });
-            Console.WriteLine("[WA] Sesión de WhatsApp OK (ya logueado).");
+            "input[role='textbox'][data-tab='3']",            // nuevo input de búsqueda
+            "input[aria-label*='Buscar']",                    // fallback por texto
+            "div[contenteditable='true'][role='textbox']",    // por si reaparece el div
+            "[role='textbox'][contenteditable='true']",
+            "div[contenteditable='true']:has(span[data-icon='search'])",
+            "div[aria-label='Buscar']",
+            "div[aria-label='Search']"
+        };
 
-            // Guardar sesión y ESPERAR confirmación
+        // Esperar hasta que alguno sea visible, con timeout total (ej. 45 segundos)
+        var waitOptions = new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = (float)timeout.TotalMilliseconds };
+        ILocator? found = null;
+
+        foreach (var selector in searchBoxSelectors)
+        {
+            try
+            {
+                var loc = page.Locator(selector);
+                await loc.WaitForAsync(waitOptions);
+                found = loc;
+                Console.WriteLine($"[WA] ✓ Sesión detectada con selector: {selector}");
+                break;
+            }
+            catch (TimeoutException)
+            {
+                Console.WriteLine($"[WA] Selector '{selector}' no apareció en {timeout.TotalSeconds} segundos.");
+            }
+        }
+
+        if (found != null)
+        {
+            Console.WriteLine("[WA] Sesión de WhatsApp OK (ya logueado).");
             await GuardarSesionWhatsAppAsync(context, storageStatePath);
             return;
         }
-        catch
+
+        // Si no hay sesión, mostrar QR y esperar a que se escanee
+        Console.WriteLine($"[WA] No hay sesión de WhatsApp. Escanea el QR en los próximos {timeout.TotalSeconds} segundos...");
+        foreach (var selector in searchBoxSelectors)
         {
-            // no-op
+            try
+            {
+                var loc = page.Locator(selector);
+                await loc.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = (float)timeout.TotalMilliseconds });
+                Console.WriteLine($"[WA] ✓ QR escaneado. Selector {selector} visible.");
+                break;
+            }
+            catch (TimeoutException)
+            {
+                // continuar
+            }
         }
 
-        Console.WriteLine($"[WA] No hay sesión de WhatsApp. Escanea el QR en los próximos {timeout.TotalSeconds} segundos...");
-
-        await searchBox.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = (float)timeout.TotalMilliseconds });
-
-        // Esperar un poco más para que se estabilice la sesión
-        await Task.Delay(2000);
-        
-        // Guardar sesión y ESPERAR confirmación
         await GuardarSesionWhatsAppAsync(context, storageStatePath);
     }
 
