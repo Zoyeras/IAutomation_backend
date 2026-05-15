@@ -12,6 +12,8 @@ if (args.Any(IsPlaywrightInstallArg))
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddScoped<IAutomationService, AutomationService>();
+builder.Services.AddScoped<ISeguimientoService, SeguimientoService>();
+builder.Services.AddSingleton<SeguimientoStore>();
 
 // DbContextFactory para AutomationService y controladores
 builder.Services.AddDbContextFactory<AppDbContext>(options =>
