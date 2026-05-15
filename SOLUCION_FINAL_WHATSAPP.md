@@ -3,6 +3,7 @@
 ## Problema
 
 El bot intentaba:
+
 1. Verificar si había contenido pre-rellenado (JavaScript complejo)
 2. Si estaba vacío, escribir el mensaje línea por línea
 3. Enviar
@@ -12,11 +13,13 @@ El bot intentaba:
 ## Solución Definitiva (SIMPLIFICADA)
 
 **WhatsApp Web pre-rellena automáticamente cuando usas la URL:**
+
 ```
 https://web.whatsapp.com/send?phone=573105003030&text=MENSAJE
 ```
 
 **El bot NO debe escribir nada. Solo debe:**
+
 1. ✅ Abrir la URL (WhatsApp pre-rellena automáticamente)
 2. ✅ Hacer click en "Enviar" (Enter o botón)
 3. ✅ Guardar sesión
@@ -97,3 +100,32 @@ SALTANDO escritura - Solo enviando...
 ✓ MENSAJE ENVIADO EXITOSAMENTE
 ```
 
+---
+
+## Storage state (sesion) - ruta correcta
+
+Problema observado: el archivo `whatsapp.storage.json` se guardaba en rutas distintas segun el directorio de ejecucion, lo que obligaba a escanear QR en cada corrida.
+
+Solucion aplicada:
+
+- Se usa `IWebHostEnvironment.ContentRootPath` como base estable.
+- Si `StorageStatePath` es relativo, se combina con ese ContentRoot.
+- Se crean los directorios si no existen y se registran logs de ruta/estado.
+
+Resultado:
+
+- La sesion se guarda y se carga desde la misma ruta, sin depender del cmd o .bat.
+
+---
+
+## Storage state - recomendaciones operativas
+
+- Verificar que el archivo exista y tenga contenido valido.
+- Si el archivo esta corrupto, borrarlo para forzar nuevo login.
+- Evitar ejecuciones paralelas que escriban la sesion al mismo tiempo.
+
+Logs recomendados:
+
+- Ruta del storage
+- Existe/size del archivo
+- Confirmacion de guardado

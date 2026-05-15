@@ -66,6 +66,8 @@ public class AutomationService : IAutomationService
         Directory.CreateDirectory(artifactsDir);
         var runId = $"{DateTime.UtcNow:yyyyMMdd_HHmmss}_{registro.Id}";
 
+        string? mensajeCreacion = null;
+
         try
         {
             Console.WriteLine("[BOT] Iniciando sesión en el sistema...");
@@ -76,6 +78,14 @@ public class AutomationService : IAutomationService
             await page.FillAsync("#name", user);
             await page.FillAsync("#password", password);
             await page.ClickAsync("#ingresar");
+
+            // Búsqueda de duplicados ANTES de cargar el formulario
+            Console.WriteLine("[BOT] Iniciando búsqueda de duplicados...");
+            var tipoClienteDeterminado = await DeterminarTipoClienteAsync(page, baseUrl, registro);
+            Console.WriteLine($"[BOT] Tipo Cliente determinado: {tipoClienteDeterminado}");
+
+            // Actualizar el registro con el TipoCliente determinado
+            registro.TipoCliente = tipoClienteDeterminado;
 
             Console.WriteLine("[BOT] Navegando al formulario...");
             await page.GotoAsync($"{baseUrl}/SolicitudGestor/create", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
@@ -126,8 +136,15 @@ public class AutomationService : IAutomationService
             // TIPO CLIENTE (dropdown nativo)
             await SeleccionarTipoClienteAsync(page, registro.TipoCliente);
 
-            // Guardar y crear ticket
-            await GuardarSolicitudAsync(page);
+            // Guardar y crear ticket (validar SweetAlert)
+            var resultadoGuardado = await GuardarSolicitudAsync(page);
+            if (!resultadoGuardado.Success)
+            {
+                throw new InvalidOperationException($"Error guardando solicitud: {resultadoGuardado.Message}");
+            }
+
+            mensajeCreacion = resultadoGuardado.Message;
+            await ActualizarEstadoAutomatizacionAsync(registro.Id, "EN_PROCESO", mensajeCreacion);
 
             // Validar en listado y capturar el TICKET real de la fila que corresponde
             var ticketEncontrado = await ValidarEnListadoYObtenerTicketAsync(page, baseUrl, registro.Nit ?? string.Empty, registro.Empresa ?? string.Empty);
@@ -139,7 +156,7 @@ public class AutomationService : IAutomationService
 
             Console.WriteLine("[BOT] Flujo completado.");
 
-            await ActualizarEstadoAutomatizacionAsync(registro.Id, "COMPLETADO", null);
+            await ActualizarEstadoAutomatizacionAsync(registro.Id, "COMPLETADO", mensajeCreacion);
 
             await Task.Delay(30000);
         }
@@ -190,6 +207,306 @@ public class AutomationService : IAutomationService
         catch (Exception ex)
         {
             Console.WriteLine($"[BOT] Error persistiendo ticket en BD. Id={registroId}. Error={ex.Message}");
+        }
+    }
+
+    private async Task<string> DeterminarTipoClienteAsync(IPage page, string baseUrl, Registro registro)
+    {
+        try
+        {
+            var nit = registro.Nit?.Trim() ?? string.Empty;
+            var empresa = registro.Empresa?.Trim() ?? string.Empty;
+            var celular = registro.Celular?.Trim().Replace(" ", "").Replace("-", "") ?? string.Empty;
+
+            Console.WriteLine($"[BOT] Navegando a listado para búsqueda de duplicados: {baseUrl}/SolicitudGestor");
+            await page.GotoAsync($"{baseUrl}/SolicitudGestor", new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+
+            // Esperar a que la tabla renderice
+            await Task.Delay(10000);
+
+            var rowsLocator = page.Locator("table.responsive-table tbody tr");
+            var rowCount = await rowsLocator.CountAsync();
+            Console.WriteLine($"[BOT] Encontradas {rowCount} filas en tabla (pagina actual)");
+
+            if (!string.IsNullOrWhiteSpace(nit))
+            {
+                Console.WriteLine($"[BOT] Intento 1: Buscando por NIT '{nit}'...");
+                var rowsSnapshot = await ObtenerFilasFiltradasAsync(page, nit);
+                bool encontroFactura = await BuscarEnResultadosYValidarAsync(page, baseUrl, rowsSnapshot, "NIT", nit, empresa: null, celular: null);
+                if (encontroFactura)
+                {
+                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por NIT. Tipo Cliente = ANTIGUO");
+                    return "Antiguo";
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(empresa))
+            {
+                Console.WriteLine($"[BOT] Intento 2: Buscando por Empresa '{empresa}'...");
+                var rowsSnapshot = await ObtenerFilasFiltradasAsync(page, empresa);
+                bool encontroFactura = await BuscarEnResultadosYValidarAsync(page, baseUrl, rowsSnapshot, "EMPRESA", nit: null, empresa: empresa, celular: null);
+                if (encontroFactura)
+                {
+                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por Empresa. Tipo Cliente = ANTIGUO");
+                    return "Antiguo";
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(celular))
+            {
+                Console.WriteLine($"[BOT] Intento 3: Buscando por Celular '{celular}'...");
+                var rowsSnapshot = await ObtenerFilasFiltradasAsync(page, celular);
+                bool encontroFactura = await BuscarEnResultadosYValidarAsync(page, baseUrl, rowsSnapshot, "CELULAR", nit: null, empresa: null, celular: celular);
+                if (encontroFactura)
+                {
+                    Console.WriteLine("[BOT][DUPLICADO] Factura encontrada por Celular. Tipo Cliente = ANTIGUO");
+                    return "Antiguo";
+                }
+            }
+
+            Console.WriteLine("[BOT] Sin factura válida encontrada. Tipo Cliente = NUEVO");
+            return "Nuevo";
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En DeterminarTipoClienteAsync: {ex.Message}");
+            return "Nuevo";
+        }
+    }
+
+    private async Task<bool> BuscarEnResultadosYValidarAsync(IPage page, string baseUrl, List<TicketRowData> rowsSnapshot, string tipoIntento, string? nit, string? empresa, string? celular)
+    {
+        try
+        {
+            IEnumerable<TicketRowData> coincidentes = rowsSnapshot;
+
+            if (tipoIntento == "NIT" && !string.IsNullOrWhiteSpace(nit))
+            {
+                coincidentes = coincidentes.Where(r => string.Equals(r.Nit, nit, StringComparison.OrdinalIgnoreCase));
+            }
+            else if (tipoIntento == "EMPRESA" && !string.IsNullOrWhiteSpace(empresa))
+            {
+                var empresaNormalizada = NormalizarTextoStatic(empresa);
+                coincidentes = coincidentes.Where(r =>
+                {
+                    var empresaRowNormalizada = NormalizarTextoStatic(r.Empresa);
+                    return empresaRowNormalizada == empresaNormalizada ||
+                           empresaRowNormalizada.Contains(empresaNormalizada) ||
+                           empresaNormalizada.Contains(empresaRowNormalizada);
+                });
+            }
+            else if (tipoIntento == "CELULAR" && !string.IsNullOrWhiteSpace(celular))
+            {
+                coincidentes = coincidentes.Where(r => string.Equals(r.Celular, celular, StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                return false;
+            }
+
+            var coincidentesList = coincidentes.ToList();
+            Console.WriteLine($"[BOT] Coincidencias por {tipoIntento}: {coincidentesList.Count}");
+
+            foreach (var row in coincidentesList)
+            {
+                if (string.IsNullOrWhiteSpace(row.Ticket)) continue;
+                Console.WriteLine($"[BOT] Coincidencia encontrada en fila: {row.Ticket}. Verificando factura...");
+                bool tieneFactura = await ValidarFacturaEnTicketAsync(page, baseUrl, row.Ticket, row.VerUrl);
+                if (tieneFactura)
+                    return true;
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En BuscarEnResultadosYValidarAsync: {ex.Message}");
+            return false;
+        }
+    }
+
+    private sealed class TicketRowData
+    {
+        public string Ticket { get; set; } = string.Empty;
+        public string Nit { get; set; } = string.Empty;
+        public string Empresa { get; set; } = string.Empty;
+        public string Celular { get; set; } = string.Empty;
+        public string VerUrl { get; set; } = string.Empty;
+    }
+
+    private async Task<List<TicketRowData>> ObtenerFilasFiltradasAsync(IPage page, string? query)
+    {
+        await AplicarFiltroListadoAsync(page, query);
+
+        var rowsSnapshot = new List<TicketRowData>();
+        var ticketsSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var pagesVisited = 0;
+
+        while (true)
+        {
+            await CapturarFilasPaginaAsync(page, rowsSnapshot, ticketsSeen);
+            pagesVisited++;
+
+            if (pagesVisited >= 2)
+                break;
+
+            var avanzó = await IrPaginaSiguienteAsync(page);
+            if (!avanzó)
+                break;
+
+            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 60000 });
+            await Task.Delay(1000);
+
+        }
+
+        return rowsSnapshot;
+    }
+
+    private static async Task AplicarFiltroListadoAsync(IPage page, string? query)
+    {
+        var searchInput = page.Locator("input#nombre[name='buscar']");
+
+        try
+        {
+            await searchInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+
+            await searchInput.FillAsync(string.Empty);
+            if (!string.IsNullOrWhiteSpace(query))
+            {
+                await searchInput.FillAsync(query);
+            }
+
+            await searchInput.PressAsync("Enter");
+            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 60000 });
+            await Task.Delay(1000);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT] Falló aplicar filtro en listado (input#nombre). Error={ex.Message}");
+        }
+    }
+
+    private static async Task CapturarFilasPaginaAsync(IPage page, List<TicketRowData> rowsSnapshot, HashSet<string> ticketsSeen)
+    {
+        var rowsLocator = page.Locator("table.responsive-table tbody tr");
+        var rowCount = await rowsLocator.CountAsync();
+
+        for (int i = 0; i < rowCount; i++)
+        {
+            var row = rowsLocator.Nth(i);
+            var cells = row.Locator("td");
+            var cellCount = await cells.CountAsync();
+            // Mínimo de columnas esperadas: 12 (incluyendo la celda oculta de control)
+            if (cellCount < 12) continue;
+
+            // La primera celda es la de control (colapsable) → ticket en índice 1
+            var ticket = (await cells.Nth(1).InnerTextAsync()).Trim();
+            if (string.IsNullOrWhiteSpace(ticket)) continue;
+
+            if (!ticketsSeen.Add(ticket))
+                continue;
+
+            // Índices reales según el HTML:
+            // Nit = 4, Empresa = 5, Celular = 7
+            var nit = (await cells.Nth(4).InnerTextAsync()).Trim();
+            var empresa = (await cells.Nth(5).InnerTextAsync()).Trim();
+            var celular = (await cells.Nth(7).InnerTextAsync()).Trim().Replace(" ", "").Replace("-", "");
+
+            var verUrl = string.Empty;
+            try
+            {
+                var actionCell = cells.Nth(cellCount - 1);
+                var verLink = actionCell.Locator("a[data-original-title='Ver'], a[title='Ver'], a[href*='/SolicitudGestor/']").First;
+                if (await verLink.CountAsync() > 0)
+                {
+                    verUrl = (await verLink.GetAttributeAsync("href") ?? string.Empty).Trim();
+                }
+            }
+            catch
+            {
+                // no-op
+            }
+
+            rowsSnapshot.Add(new TicketRowData
+            {
+                Ticket = ticket,
+                Nit = nit,
+                Empresa = empresa,
+                Celular = celular,
+                VerUrl = verUrl
+            });
+        }
+    }
+
+    private static async Task<bool> IrPaginaSiguienteAsync(IPage page)
+    {
+        var pagination = page.Locator("ul.pagination");
+        if (await pagination.CountAsync() == 0)
+            return false;
+
+        var links = await pagination.Locator("li a").ElementHandlesAsync();
+        foreach (var link in links)
+        {
+            var text = (await link.InnerTextAsync()).Trim();
+            if (text == ">" || text == "›" || text.Equals("Siguiente", StringComparison.OrdinalIgnoreCase) || text.Equals("Next", StringComparison.OrdinalIgnoreCase))
+            {
+                var isDisabled = await link.EvaluateAsync<bool>("el => el.closest('li')?.classList.contains('disabled') ?? false");
+                if (isDisabled)
+                    return false;
+
+                try
+                {
+                    await link.ClickAsync();
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<bool> ValidarFacturaEnTicketAsync(IPage page, string baseUrl, string ticket, string? verUrl)
+    {
+        try
+        {
+            var targetUrl = !string.IsNullOrWhiteSpace(verUrl)
+                ? verUrl!
+                : $"{baseUrl}/SolicitudGestor/{ticket}";
+
+            Console.WriteLine($"[BOT] Abriendo vista del ticket {ticket}... URL={targetUrl}");
+            await page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
+
+            // Esperar a que cargue el contenido
+            await Task.Delay(10000);
+
+            var facturaLocator = page.Locator("#factura");
+            var facturaExists = await facturaLocator.CountAsync();
+
+            if (facturaExists == 0)
+            {
+                Console.WriteLine($"[BOT] Campo #factura no encontrado en ticket {ticket}");
+                return false;
+            }
+
+            var facturaValue = (await facturaLocator.InputValueAsync()).Trim();
+
+            if (string.IsNullOrWhiteSpace(facturaValue) || facturaValue == "0" || facturaValue == "0000")
+            {
+                Console.WriteLine($"[BOT] Factura vacía o inválida en ticket {ticket}: '{facturaValue}'");
+                return false;
+            }
+
+            Console.WriteLine($"[BOT] Factura válida encontrada en ticket {ticket}: '{facturaValue}'");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BOT][ERROR] En ValidarFacturaEnTicketAsync para ticket {ticket}: {ex.Message}");
+            return false;
         }
     }
 
@@ -373,7 +690,6 @@ public class AutomationService : IAutomationService
         };
 
         await page.WaitForSelectorAsync("#asignado_a", new PageWaitForSelectorOptions { State = WaitForSelectorState.Visible, Timeout = 60000 });
-
         var asignadoNorm = NormalizarTextoStatic(asignado);
         if (!map.TryGetValue(asignadoNorm, out var value))
         {
@@ -487,7 +803,7 @@ public class AutomationService : IAutomationService
         };
     }
 
-    private static async Task GuardarSolicitudAsync(IPage page)
+    private static async Task<(bool Success, string Message)> GuardarSolicitudAsync(IPage page)
     {
         // El botón/acción de guardar crea el ticket y luego redirige al listado.
         // Esperamos que exista y esté clickable.
@@ -512,6 +828,74 @@ public class AutomationService : IAutomationService
 
         // Espera corta a que el sistema procese/redirect.
         await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded, new PageWaitForLoadStateOptions { Timeout = 60000 });
+
+        // Validar mensaje de resultado (SweetAlert)
+        var sweetAlert = page.Locator("div.sweet-alert.showSweetAlert, div.sweet-alert");
+        try
+        {
+            await sweetAlert.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10000 });
+        }
+        catch
+        {
+            Console.WriteLine("[BOT][WARN] No se detecto SweetAlert de confirmacion. Continuando.");
+            return (true, "Sin SweetAlert");
+        }
+
+        var title = string.Empty;
+        var text = string.Empty;
+        try
+        {
+            var titleLoc = sweetAlert.Locator("h2");
+            if (await titleLoc.CountAsync() > 0)
+                title = (await titleLoc.InnerTextAsync()).Trim();
+
+            var textLoc = sweetAlert.Locator("p");
+            if (await textLoc.CountAsync() > 0)
+                text = (await textLoc.First.InnerTextAsync()).Trim();
+        }
+        catch
+        {
+            // no-op
+        }
+
+        var normalizedTitle = NormalizarTextoStatic(title);
+        var normalizedText = NormalizarTextoStatic(text);
+
+        var isSuccess = normalizedTitle.Contains("CORRECTO") ||
+                        normalizedText.Contains("EXITOSAMENTE") ||
+                        normalizedText.Contains("EXITOSO") ||
+                        normalizedText.Contains("ACTUALIZADOS") ||
+                        normalizedText.Contains("ACTUALIZADO");
+
+        var isError = normalizedTitle.Contains("ERROR") ||
+                      normalizedTitle.Contains("ADVERTENCIA") ||
+                      normalizedText.Contains("NO SE PUDO") ||
+                      normalizedText.Contains("ERROR");
+
+        var confirmButton = sweetAlert.Locator("button.confirm");
+        if (await confirmButton.CountAsync() > 0)
+        {
+            await confirmButton.ClickAsync();
+        }
+
+        var message = string.IsNullOrWhiteSpace(title)
+            ? text
+            : (string.IsNullOrWhiteSpace(text) ? title : $"{title}: {text}");
+
+        if (isError && !isSuccess)
+        {
+            Console.WriteLine($"[BOT][ERROR] GuardarSolicitud: {message}");
+            return (false, message);
+        }
+
+        if (isSuccess)
+        {
+            Console.WriteLine($"[BOT] GuardarSolicitud OK: {message}");
+            return (true, message);
+        }
+
+        Console.WriteLine($"[BOT][WARN] GuardarSolicitud sin estado claro: {message}");
+        return (false, message);
     }
 
     private static async Task<string> ValidarEnListadoYObtenerTicketAsync(IPage page, string baseUrl, string nitBackend, string empresaBackend)
@@ -562,11 +946,12 @@ public class AutomationService : IAutomationService
                 var row = rowsLocator.Nth(i);
                 var cells = row.Locator("td");
                 var cellCount = await cells.CountAsync();
-                if (cellCount < 5) continue;
+                if (cellCount < 12) continue;
 
-                var ticket = T(await cells.Nth(0).InnerTextAsync());
-                var nitRow = T(await cells.Nth(3).InnerTextAsync());
-                var empresaRow = T(await cells.Nth(4).InnerTextAsync());
+                // Índices: Ticket = 1, Nit = 4, Empresa = 5
+                var ticket = T(await cells.Nth(1).InnerTextAsync());
+                var nitRow = T(await cells.Nth(4).InnerTextAsync());
+                var empresaRow = T(await cells.Nth(5).InnerTextAsync());
 
                 // Match 1: NIT exacto
                 if (!string.IsNullOrWhiteSpace(nit) && string.Equals(nitRow, nit, StringComparison.OrdinalIgnoreCase))
@@ -635,7 +1020,7 @@ public class AutomationService : IAutomationService
         count = await rowsLocator.CountAsync();
         if (count > 0)
         {
-            var first = rowsLocator.Nth(0).Locator("td").Nth(0);
+            var first = rowsLocator.Nth(0).Locator("td").Nth(1);   // ← índice 1
             var ticketFallback = T(await first.InnerTextAsync());
 
             Console.WriteLine($"[BOT][WARN] No hubo coincidencia exacta en listado. NIT='{nit}', Empresa='{empresa}'. " +
@@ -760,6 +1145,7 @@ public class AutomationService : IAutomationService
 
         var page = context.Pages.Count > 0 ? context.Pages[0] : await context.NewPageAsync();
 
+        // Navegar a WhatsApp Web con DOMContentLoaded (evita bloqueos por NetworkIdle)
         await page.GotoAsync(waBaseUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
         try { await page.BringToFrontAsync(); } catch { /* no-op */ }
 
@@ -819,23 +1205,24 @@ public class AutomationService : IAutomationService
         var waWebSendUrl = $"https://web.whatsapp.com/send?phone={to}&text={encoded}";
 
         Console.WriteLine($"[WA] Abriendo chat (web): {waWebSendUrl}");
-        await page.GotoAsync(waWebSendUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 60000 });
+        // CAMBIO: NetworkIdle -> DOMContentLoaded
+        await page.GotoAsync(waWebSendUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 });
         
         // Esperamos extra para que WhatsApp cargue completamente (puede haber redirecciones)
         Console.WriteLine("[WA] Esperando 5 segundos para que WhatsApp cargue completamente (puede recargar)...");
         await Task.Delay(5000);
 
         // Ya en WhatsApp Web, esperamos el composer (input de mensaje)
-        // Intentamos múltiples selectores en orden de preferencia
+        // Selectores actualizados según nueva interfaz
         var composerSelectors = new[]
         {
-            "[contenteditable='true']",                        // Más genérico, funciona mejor
-            "div[contenteditable='true']",                     // Div editable
-            "div[contenteditable='true'][data-tab]",           // Con data-tab
-            "div[contenteditable='true'][role='textbox']",     // Con role
-            "[role='textbox']",                                // Solo role
-            "input[type='text'][placeholder*='message' i]",    // Input de texto
-            ".selectable-text.copyable-text"                   // Clases de WhatsApp
+            "div[contenteditable='true'][role='textbox'][aria-label='Mensaje']",
+            "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true']:last-of-type",
+            "[contenteditable='true']",
+            "div[contenteditable='true'][data-tab]",
+            "div[aria-label='Mensaje']",
+            "div[aria-label='Message']"
         };
 
         ILocator? composer = null;
@@ -1051,22 +1438,25 @@ public class AutomationService : IAutomationService
         if (string.IsNullOrWhiteSpace(name))
             throw new InvalidOperationException("WhatsAppConfig:GroupName vacío");
 
-        // Buscar chat por nombre
-        var searchBoxCandidates = new[]
+        // Selectores actualizados para la barra de búsqueda
+        var searchBoxSelectors = new[]
         {
-            "div[contenteditable='true'][data-tab='3']",
-            "div[contenteditable='true'][data-tab='4']",
-            "div[contenteditable='true'][data-tab='5']",
-            "div[contenteditable='true'][role='textbox']"
+            "input[role='textbox'][data-tab='3']",
+            "input[aria-label*='Buscar']",
+            "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true'][data-tab]",
+            "div[aria-label='Buscar']",
+            "div[aria-label='Search']"
         };
 
         ILocator? searchBox = null;
-        foreach (var sel in searchBoxCandidates)
+        foreach (var sel in searchBoxSelectors)
         {
             var loc = page.Locator(sel).First;
             if (await loc.CountAsync() > 0)
             {
                 searchBox = loc;
+                Console.WriteLine($"[WA] Buscador encontrado con selector: {sel}");
                 break;
             }
         }
@@ -1107,8 +1497,9 @@ public class AutomationService : IAutomationService
         // Composer y envío por renglones
         var composerSelectors = new[]
         {
-            "div[contenteditable='true'][data-tab]",
+            "div[contenteditable='true'][role='textbox'][aria-label='Mensaje']",
             "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true'][data-tab]",
             "[contenteditable='true']"
         };
 
@@ -1119,6 +1510,7 @@ public class AutomationService : IAutomationService
             if (await loc.CountAsync() > 0)
             {
                 composer = loc.Last;
+                Console.WriteLine($"[WA] Compositor encontrado con selector: {selector}");
                 break;
             }
         }
@@ -1152,22 +1544,25 @@ public class AutomationService : IAutomationService
         if (string.IsNullOrWhiteSpace(celularNormalizado))
             throw new InvalidOperationException("Celular del cliente vacío");
 
-        // Buscar chat por celular usando la barra de búsqueda
-        var searchBoxCandidates = new[]
+        // Selectores actualizados para la barra de búsqueda
+        var searchBoxSelectors = new[]
         {
-            "div[contenteditable='true'][data-tab='3']",
-            "div[contenteditable='true'][data-tab='4']",
-            "div[contenteditable='true'][data-tab='5']",
-            "div[contenteditable='true'][role='textbox']"
+            "input[role='textbox'][data-tab='3']",
+            "input[aria-label*='Buscar']",
+            "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true'][data-tab]",
+            "div[aria-label='Buscar']",
+            "div[aria-label='Search']"
         };
 
         ILocator? searchBox = null;
-        foreach (var sel in searchBoxCandidates)
+        foreach (var sel in searchBoxSelectors)
         {
             var loc = page.Locator(sel).First;
             if (await loc.CountAsync() > 0)
             {
                 searchBox = loc;
+                Console.WriteLine($"[WA] Buscador encontrado con selector: {sel}");
                 break;
             }
         }
@@ -1206,8 +1601,9 @@ public class AutomationService : IAutomationService
         // Encontrar el compositor y escribir mensaje por líneas
         var composerSelectors = new[]
         {
-            "div[contenteditable='true'][data-tab]",
+            "div[contenteditable='true'][role='textbox'][aria-label='Mensaje']",
             "div[contenteditable='true'][role='textbox']",
+            "div[contenteditable='true'][data-tab]",
             "[contenteditable='true']"
         };
 
@@ -1218,6 +1614,7 @@ public class AutomationService : IAutomationService
             if (await loc.CountAsync() > 0)
             {
                 composer = loc.Last;
+                Console.WriteLine($"[WA] Compositor encontrado con selector: {selector}");
                 break;
             }
         }
@@ -1247,30 +1644,62 @@ public class AutomationService : IAutomationService
 
     private static async Task AsegurarLoginWhatsAppAsync(IPage page, IBrowserContext context, string storageStatePath, TimeSpan timeout)
     {
-        var searchBox = page.Locator("div[contenteditable='true'][data-tab='3']");
-
-        try
+        // Selectores actualizados para el cuadro de búsqueda de WhatsApp Web
+        var searchBoxSelectors = new[]
         {
-            await searchBox.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 8000 });
-            Console.WriteLine("[WA] Sesión de WhatsApp OK (ya logueado).");
+            "input[role='textbox'][data-tab='3']",            // nuevo input de búsqueda
+            "input[aria-label*='Buscar']",                    // fallback por texto
+            "div[contenteditable='true'][role='textbox']",    // por si reaparece el div
+            "[role='textbox'][contenteditable='true']",
+            "div[contenteditable='true']:has(span[data-icon='search'])",
+            "div[aria-label='Buscar']",
+            "div[aria-label='Search']"
+        };
 
-            // Guardar sesión y ESPERAR confirmación
+        // Esperar hasta que alguno sea visible, con timeout total (ej. 45 segundos)
+        var waitOptions = new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = (float)timeout.TotalMilliseconds };
+        ILocator? found = null;
+
+        foreach (var selector in searchBoxSelectors)
+        {
+            try
+            {
+                var loc = page.Locator(selector);
+                await loc.WaitForAsync(waitOptions);
+                found = loc;
+                Console.WriteLine($"[WA] ✓ Sesión detectada con selector: {selector}");
+                break;
+            }
+            catch (TimeoutException)
+            {
+                Console.WriteLine($"[WA] Selector '{selector}' no apareció en {timeout.TotalSeconds} segundos.");
+            }
+        }
+
+        if (found != null)
+        {
+            Console.WriteLine("[WA] Sesión de WhatsApp OK (ya logueado).");
             await GuardarSesionWhatsAppAsync(context, storageStatePath);
             return;
         }
-        catch
+
+        // Si no hay sesión, mostrar QR y esperar a que se escanee
+        Console.WriteLine($"[WA] No hay sesión de WhatsApp. Escanea el QR en los próximos {timeout.TotalSeconds} segundos...");
+        foreach (var selector in searchBoxSelectors)
         {
-            // no-op
+            try
+            {
+                var loc = page.Locator(selector);
+                await loc.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = (float)timeout.TotalMilliseconds });
+                Console.WriteLine($"[WA] ✓ QR escaneado. Selector {selector} visible.");
+                break;
+            }
+            catch (TimeoutException)
+            {
+                // continuar
+            }
         }
 
-        Console.WriteLine($"[WA] No hay sesión de WhatsApp. Escanea el QR en los próximos {timeout.TotalSeconds} segundos...");
-
-        await searchBox.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = (float)timeout.TotalMilliseconds });
-
-        // Esperar un poco más para que se estabilice la sesión
-        await Task.Delay(2000);
-        
-        // Guardar sesión y ESPERAR confirmación
         await GuardarSesionWhatsAppAsync(context, storageStatePath);
     }
 
